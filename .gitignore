@@ -6,3 +6,8 @@ release/
 .env
 *.local
 *.log
+fits.json
+todos.json
+roadmap.json
+pronunciations.json
+structures.json
