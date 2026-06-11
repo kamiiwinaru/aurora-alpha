@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Industry Panel – Color Preview</title>
+<style>
+  :root {
+    --bg:      #080b10;
+    --panel:   #0d1117;
+    --border:  #1a2332;
+    --cyan:    #00d4ff;
+    --gold:    #c8a84b;
+    --green:   #33cc66;
+    --orange:  #ff6b00;
+    --text:    #d6e2ee;
+    --muted:   #b8944a;   /* GOLD option */
+    --dim:     #7a6030;   /* GOLD option */
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: var(--bg); font-family: 'Courier New', monospace; color: var(--text); font-size: 13px; padding: 16px; }
+  .panel { background: var(--panel); border: 1px solid var(--border); padding: 16px; }
+  .panel + .panel { margin-top: 12px; }
+  .header { font-size: 10px; text-transform: uppercase; letter-spacing: .15em; color: var(--cyan); border-bottom: 1px solid var(--border); padding-bottom: 8px; margin-bottom: 12px; }
+  .label  { font-size: 9px;  text-transform: uppercase; letter-spacing: .12em; color: var(--dim); margin-bottom: 4px; }
+  .value  { font-size: 12px; color: var(--text); }
+  .muted  { color: var(--muted); font-size: 10px; }
+  .dim    { color: var(--dim);   font-size: 9px; }
+  .cyan   { color: var(--cyan); }
+  .gold   { color: var(--gold); }
+  .green  { color: var(--green); }
+  .orange-accent { color: var(--orange); }
+  input, select {
+    width: 100%; background: #080b10; border: 1px solid var(--border); color: var(--text);
+    font-family: inherit; font-size: 12px; padding: 6px 8px; outline: none;
+  }
+  input:focus, select:focus { border-color: var(--cyan); }
+  input::placeholder { color: var(--dim); }
+  .row { display: flex; gap: 12px; }
+  .col { flex: 1; }
+  .btn { padding: 6px 12px; border: 1px solid var(--border); color: var(--muted); background: none; font-family: inherit; font-size: 10px; text-transform: uppercase; letter-spacing: .1em; cursor: pointer; }
+  .btn-primary { border-color: var(--cyan); color: var(--cyan); background: rgba(0,212,255,.08); }
+  .stat-grid { display: grid; grid-template-columns: repeat(3,1fr); gap: 8px; }
+  .stat { background: rgba(26,35,50,.4); border: 1px solid var(--border); padding: 8px; }
+  .stat .val { font-size: 14px; font-weight: bold; margin-top: 2px; }
+  .dropdown { background: #0a0e14; border: 1px solid var(--border); }
+  .dropdown-item { padding: 6px 10px; font-size: 11px; color: var(--text); border-bottom: 1px solid rgba(26,35,50,.5); }
+  .dropdown-item:hover { background: rgba(0,212,255,.08); color: var(--cyan); }
+  .slider-row { display: flex; align-items: center; gap: 10px; margin-top: 6px; }
+  input[type=range] { flex: 1; accent-color: var(--cyan); }
+  .runs-input { width: 60px; }
+  .separator { border: none; border-top: 1px solid var(--border); margin: 10px 0; }
+  .tag { display: inline-block; font-size: 8px; padding: 2px 6px; border: 1px solid; text-transform: uppercase; letter-spacing: .1em; }
+  .tag-cyan { border-color: rgba(0,212,255,.4); color: var(--cyan); background: rgba(0,212,255,.08); }
+  .tag-gold { border-color: rgba(200,168,75,.4); color: var(--gold); background: rgba(200,168,75,.06); }
+</style>
+</head>
+<body>
+<div style="max-width:900px; margin: 0 auto;">
+
+  <!-- Blueprint search -->
+  <div class="panel">
+    <div class="header">◈ Industry Planner</div>
+    <div class="row" style="align-items:flex-start; gap:16px;">
+      <div class="col">
+        <div class="label">Blueprint Search</div>
+        <input type="text" placeholder="Search blueprints…" value="Venture" />
+        <!-- Dropdown open state -->
+        <div class="dropdown" style="margin-top:2px;">
+          <div class="dropdown-item cyan">Venture Blueprint</div>
+          <div class="dropdown-item">Venture II Blueprint</div>
+          <div class="dropdown-item">Venture Fitting Blueprint</div>
+        </div>
+      </div>
+      <div class="col">
+        <div class="label">Facility</div>
+        <select>
+          <option>Perimeter – Tranquility Trading Tower</option>
+          <option>Jita 4-4 – CNAP</option>
+        </select>
+      </div>
+    </div>
+
+    <hr class="separator" />
+
+    <!-- Runs + ME/TE sliders -->
+    <div class="row">
+      <div class="col">
+        <div class="label">Runs</div>
+        <div class="slider-row">
+          <input type="range" min="1" max="100" value="10" />
+          <input type="text" class="runs-input" value="10" style="width:52px;" />
+        </div>
+      </div>
+      <div class="col">
+        <div class="label">Material Efficiency</div>
+        <div class="slider-row">
+          <input type="range" min="0" max="10" value="10" />
+          <span class="value" style="width:28px;">10%</span>
+        </div>
+      </div>
+      <div class="col">
+        <div class="label">Time Efficiency</div>
+        <div class="slider-row">
+          <input type="range" min="0" max="20" value="16" />
+          <span class="value" style="width:28px;">16%</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Results / output -->
+  <div class="panel">
+    <div class="header">Output — Venture <span class="tag tag-cyan" style="margin-left:8px;">×10 RUNS</span> <span class="tag tag-gold" style="margin-left:4px;">ME10</span></div>
+    <div class="stat-grid">
+      <div class="stat">
+        <div class="label">Build Cost</div>
+        <div class="val green">142.3M ISK</div>
+        <div class="dim">per unit: 14.23M</div>
+      </div>
+      <div class="stat">
+        <div class="label">Market Value</div>
+        <div class="val cyan">198.6M ISK</div>
+        <div class="dim">Jita sell: 19.86M</div>
+      </div>
+      <div class="stat">
+        <div class="label">Margin</div>
+        <div class="val orange-accent">+56.3M ISK</div>
+        <div class="dim muted">39.5% profit</div>
+      </div>
+    </div>
+
+    <hr class="separator" />
+
+    <!-- Material list header -->
+    <div style="display:grid; grid-template-columns:1fr 80px 100px 100px; gap:4px; padding:4px 0; font-size:9px; text-transform:uppercase; letter-spacing:.1em;" class="dim">
+      <span>Material</span><span style="text-align:right;">Qty</span><span style="text-align:right;">Unit Price</span><span style="text-align:right;">Total</span>
+    </div>
+    <!-- Material rows -->
+    <div style="display:grid; grid-template-columns:1fr 80px 100px 100px; gap:4px; padding:5px 0; border-top:1px solid var(--border);">
+      <span class="value">Tritanium</span>
+      <span class="muted" style="text-align:right;">34,560</span>
+      <span class="dim" style="text-align:right;">4.82 ISK</span>
+      <span class="value" style="text-align:right;">166,579</span>
+    </div>
+    <div style="display:grid; grid-template-columns:1fr 80px 100px 100px; gap:4px; padding:5px 0; border-top:1px solid var(--border);">
+      <span class="value">Pyerite</span>
+      <span class="muted" style="text-align:right;">11,200</span>
+      <span class="dim" style="text-align:right;">6.14 ISK</span>
+      <span class="value" style="text-align:right;">68,768</span>
+    </div>
+    <div style="display:grid; grid-template-columns:1fr 80px 100px 100px; gap:4px; padding:5px 0; border-top:1px solid var(--border);">
+      <span class="value">Mexallon</span>
+      <span class="muted" style="text-align:right;">3,600</span>
+      <span class="dim" style="text-align:right;">52.10 ISK</span>
+      <span class="value" style="text-align:right;">187,560</span>
+    </div>
+    <div style="display:grid; grid-template-columns:1fr 80px 100px 100px; gap:4px; padding:5px 0; border-top:1px solid var(--border);">
+      <span class="value">Isogen</span>
+      <span class="muted" style="text-align:right;">720</span>
+      <span class="dim" style="text-align:right;">88.40 ISK</span>
+      <span class="value" style="text-align:right;">63,648</span>
+    </div>
+  </div>
+
+  <!-- Freight -->
+  <div class="panel">
+    <div class="header">Freight Calculator</div>
+    <div class="row">
+      <div class="col">
+        <div class="label">Origin</div>
+        <input type="text" placeholder="Jita" value="Jita" />
+      </div>
+      <div class="col">
+        <div class="label">Destination</div>
+        <input type="text" placeholder="Amarr" value="Amarr" />
+      </div>
+      <div class="col">
+        <div class="label">Volume (m³)</div>
+        <input type="text" placeholder="0.00" value="12,400" />
+      </div>
+      <div class="col">
+        <div class="label">Collateral (ISK)</div>
+        <input type="text" placeholder="0" value="198,600,000" />
+      </div>
+    </div>
+    <div style="margin-top:8px; display:flex; gap:8px; align-items:center;">
+      <button class="btn btn-primary">CALCULATE</button>
+      <span class="muted">Est. cost: </span><span class="cyan" style="font-size:13px;">14.2M ISK</span>
+      <span class="dim" style="margin-left:8px;">via Red Frog · 3–5 days</span>
+    </div>
+  </div>
+
+</div>
+</body>
+</html>

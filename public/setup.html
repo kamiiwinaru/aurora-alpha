@@ -1,0 +1,311 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Aurora Alpha — Setup</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --cyan: #00d4ff;
+      --cyan-dim: rgba(0,212,255,0.15);
+      --cyan-border: rgba(0,212,255,0.3);
+      --gold: #f0c040;
+      --red: #ff4444;
+      --bg: #080b10;
+      --panel: #0d1117;
+      --border: rgba(0,212,255,0.15);
+      --muted: #4a5568;
+      --dim: #2d3748;
+      --text: #a0aec0;
+    }
+
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: 'Courier New', Courier, monospace;
+      font-size: 13px;
+      height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      overflow: hidden;
+    }
+
+    /* Scanline overlay */
+    body::after {
+      content: '';
+      position: fixed;
+      inset: 0;
+      background: repeating-linear-gradient(0deg, transparent, transparent 2px, rgba(0,0,0,0.03) 2px, rgba(0,0,0,0.03) 4px);
+      pointer-events: none;
+      z-index: 9999;
+    }
+
+    .corner { position: fixed; width: 20px; height: 20px; }
+    .corner.tl { top: 12px; left: 12px; border-top: 2px solid var(--cyan-border); border-left: 2px solid var(--cyan-border); }
+    .corner.tr { top: 12px; right: 12px; border-top: 2px solid var(--cyan-border); border-right: 2px solid var(--cyan-border); }
+    .corner.bl { bottom: 12px; left: 12px; border-bottom: 2px solid var(--cyan-border); border-left: 2px solid var(--cyan-border); }
+    .corner.br { bottom: 12px; right: 12px; border-bottom: 2px solid var(--cyan-border); border-right: 2px solid var(--cyan-border); }
+
+    .container {
+      width: 100%;
+      max-width: 480px;
+      padding: 0 24px;
+      display: flex;
+      flex-direction: column;
+      gap: 20px;
+    }
+
+    .header {
+      text-align: center;
+    }
+
+    .logo {
+      font-size: 22px;
+      letter-spacing: 0.4em;
+      color: var(--cyan);
+      text-shadow: 0 0 20px rgba(0,212,255,0.6);
+    }
+
+    .subtitle {
+      font-size: 10px;
+      letter-spacing: 0.3em;
+      color: var(--muted);
+      text-transform: uppercase;
+      margin-top: 4px;
+    }
+
+    .divider {
+      height: 1px;
+      background: linear-gradient(to right, transparent, var(--cyan-border), transparent);
+      margin-top: 12px;
+    }
+
+    .panel {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      padding: 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+    }
+
+    .panel-label {
+      font-size: 10px;
+      letter-spacing: 0.3em;
+      color: var(--muted);
+      text-transform: uppercase;
+    }
+
+    .field { display: flex; flex-direction: column; gap: 4px; }
+
+    .field-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    .field-label {
+      font-size: 10px;
+      letter-spacing: 0.2em;
+      color: rgba(0,212,255,0.7);
+      text-transform: uppercase;
+    }
+
+    .field-label .req { color: var(--red); margin-left: 3px; }
+
+    .field-hint {
+      font-size: 10px;
+      color: var(--dim);
+    }
+
+    .input-wrap { position: relative; }
+
+    input {
+      width: 100%;
+      background: rgba(0,212,255,0.04);
+      border: 1px solid var(--border);
+      color: #e2e8f0;
+      font-family: inherit;
+      font-size: 12px;
+      padding: 7px 36px 7px 10px;
+      outline: none;
+      transition: border-color 0.15s;
+    }
+
+    input:focus { border-color: rgba(0,212,255,0.5); }
+    input::placeholder { color: var(--dim); }
+
+    .toggle-btn {
+      position: absolute;
+      right: 8px;
+      top: 50%;
+      transform: translateY(-50%);
+      background: none;
+      border: none;
+      color: var(--muted);
+      font-family: inherit;
+      font-size: 10px;
+      cursor: pointer;
+      letter-spacing: 0.1em;
+      padding: 0;
+    }
+
+    .toggle-btn:hover { color: var(--cyan); }
+
+    .error {
+      font-size: 11px;
+      color: var(--red);
+      text-align: center;
+      letter-spacing: 0.1em;
+      min-height: 16px;
+    }
+
+    .submit-btn {
+      width: 100%;
+      background: transparent;
+      border: 1px solid var(--cyan);
+      color: var(--cyan);
+      font-family: inherit;
+      font-size: 12px;
+      letter-spacing: 0.3em;
+      text-transform: uppercase;
+      padding: 10px;
+      cursor: pointer;
+      transition: background 0.15s, box-shadow 0.15s;
+    }
+
+    .submit-btn:hover:not(:disabled) {
+      background: var(--cyan-dim);
+      box-shadow: 0 0 16px rgba(0,212,255,0.2);
+    }
+
+    .submit-btn:disabled {
+      opacity: 0.4;
+      cursor: not-allowed;
+    }
+  </style>
+</head>
+<body>
+  <div class="corner tl"></div>
+  <div class="corner tr"></div>
+  <div class="corner bl"></div>
+  <div class="corner br"></div>
+
+  <div class="container">
+    <div class="header">
+      <div class="logo">◈ AURORA</div>
+      <div class="subtitle">Initial Configuration</div>
+      <div class="divider"></div>
+    </div>
+
+    <div class="panel">
+      <div class="panel-label">Required</div>
+
+      <div class="field">
+        <div class="field-header">
+          <label class="field-label">Anthropic API Key<span class="req">*</span></label>
+          <span class="field-hint">console.anthropic.com → API Keys</span>
+        </div>
+        <div class="input-wrap">
+          <input id="ANTHROPIC_API_KEY" type="password" placeholder="sk-ant-api03-..." autocomplete="off" />
+          <button class="toggle-btn" onclick="toggle('ANTHROPIC_API_KEY', this)">SHOW</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <div class="panel-label">Optional</div>
+
+      <div class="field">
+        <div class="field-header">
+          <label class="field-label">ElevenLabs API Key</label>
+          <span class="field-hint">Enables voice synthesis</span>
+        </div>
+        <div class="input-wrap">
+          <input id="ELEVENLABS_API_KEY" type="password" placeholder="sk_..." autocomplete="off" />
+          <button class="toggle-btn" onclick="toggle('ELEVENLABS_API_KEY', this)">SHOW</button>
+        </div>
+      </div>
+
+      <div class="field">
+        <div class="field-header">
+          <label class="field-label">ElevenLabs Voice ID</label>
+          <span class="field-hint">Voice ID from ElevenLabs dashboard</span>
+        </div>
+        <div class="input-wrap">
+          <input id="ELEVENLABS_VOICE_ID" type="text" placeholder="ZF6FPAbjXT4488VcRRnw" autocomplete="off" />
+        </div>
+      </div>
+    </div>
+
+    <div class="error" id="error"></div>
+
+    <button class="submit-btn" id="submitBtn" onclick="handleSave()">Initialize Aurora</button>
+  </div>
+
+  <script>
+    const REQUIRED = ['ANTHROPIC_API_KEY', 'EVE_CLIENT_ID', 'EVE_CLIENT_SECRET']
+
+    // Pre-populate from existing .env values if any
+    window.addEventListener('DOMContentLoaded', async () => {
+      try {
+        const existing = await window.electronAPI.getEnvValues()
+        for (const [k, v] of Object.entries(existing)) {
+          const el = document.getElementById(k)
+          if (el) el.value = v
+        }
+        updateBtn()
+      } catch (e) {}
+    })
+
+    function toggle(id, btn) {
+      const el = document.getElementById(id)
+      if (el.type === 'password') { el.type = 'text'; btn.textContent = 'HIDE' }
+      else { el.type = 'password'; btn.textContent = 'SHOW' }
+    }
+
+    function updateBtn() {
+      const missing = REQUIRED.filter(k => !document.getElementById(k).value.trim())
+      document.getElementById('submitBtn').disabled = missing.length > 0
+    }
+
+    document.querySelectorAll('input').forEach(el => el.addEventListener('input', updateBtn))
+    updateBtn()
+
+    async function handleSave() {
+      const values = {}
+      document.querySelectorAll('input[id]').forEach(el => {
+        if (el.value.trim()) values[el.id] = el.value.trim()
+      })
+
+      const missing = REQUIRED.filter(k => !values[k])
+      if (missing.length > 0) {
+        document.getElementById('error').textContent = 'Required: ' + missing.join(', ')
+        return
+      }
+
+      document.getElementById('submitBtn').disabled = true
+      document.getElementById('submitBtn').textContent = 'SAVING...'
+      document.getElementById('error').textContent = ''
+
+      try {
+        const remaining = await window.electronAPI.saveEnvValues(values)
+        if (remaining.length === 0) {
+          // App will relaunch via app.relaunch() in main process
+        } else {
+          document.getElementById('error').textContent = 'Still missing: ' + remaining.join(', ')
+          document.getElementById('submitBtn').disabled = false
+          document.getElementById('submitBtn').textContent = 'INITIALIZE AURORA'
+        }
+      } catch (e) {
+        document.getElementById('error').textContent = 'Error saving configuration'
+        document.getElementById('submitBtn').disabled = false
+        document.getElementById('submitBtn').textContent = 'INITIALIZE AURORA'
+      }
+    }
+  </script>
+</body>
+</html>

@@ -1,0 +1,591 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Aurora – Star Map Preview</title>
+<style>
+  :root {
+    --bg:      #080b10;
+    --panel:   #0d1117;
+    --border:  #1a2332;
+    --cyan:    #00d4ff;
+    --gold:    #c8a84b;
+    --green:   #33cc66;
+    --orange:  #ff6b00;
+    --red:     #ff4444;
+    --text:    #d6e2ee;
+    --muted:   #8899aa;
+    --dim:     #445566;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--bg);
+    font-family: 'Courier New', monospace;
+    color: var(--text);
+    font-size: 12px;
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+
+  /* ── Header ── */
+  .header {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    padding: 8px 16px;
+    border-bottom: 1px solid var(--border);
+    background: var(--panel);
+    flex-shrink: 0;
+  }
+  .header-title {
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: .2em;
+    color: var(--cyan);
+  }
+  .header-sep { color: var(--dim); }
+  .header-stat { font-size: 9px; color: var(--muted); }
+  .header-stat span { color: var(--text); }
+
+  .controls {
+    margin-left: auto;
+    display: flex;
+    gap: 8px;
+    align-items: center;
+  }
+  .btn {
+    padding: 4px 10px;
+    border: 1px solid var(--border);
+    color: var(--muted);
+    background: none;
+    font-family: inherit;
+    font-size: 9px;
+    text-transform: uppercase;
+    letter-spacing: .1em;
+    cursor: pointer;
+    transition: all .15s;
+  }
+  .btn:hover, .btn.active { border-color: var(--cyan); color: var(--cyan); background: rgba(0,212,255,.08); }
+  .btn-gold { border-color: rgba(200,168,75,.4); color: var(--gold); }
+  .btn-gold:hover { background: rgba(200,168,75,.08); }
+
+  /* ── Layout ── */
+  .body {
+    display: flex;
+    flex: 1;
+    overflow: hidden;
+  }
+
+  /* ── Canvas ── */
+  #mapCanvas {
+    flex: 1;
+    display: block;
+    cursor: grab;
+  }
+  #mapCanvas:active { cursor: grabbing; }
+
+  /* ── Sidebar ── */
+  .sidebar {
+    width: 220px;
+    border-left: 1px solid var(--border);
+    background: var(--panel);
+    display: flex;
+    flex-direction: column;
+    flex-shrink: 0;
+    overflow: hidden;
+  }
+  .sidebar-section {
+    border-bottom: 1px solid var(--border);
+    padding: 10px 12px;
+  }
+  .sidebar-label {
+    font-size: 8px;
+    text-transform: uppercase;
+    letter-spacing: .15em;
+    color: var(--dim);
+    margin-bottom: 6px;
+  }
+  .sidebar-value {
+    font-size: 11px;
+    color: var(--text);
+    margin-bottom: 2px;
+  }
+  .sidebar-sub {
+    font-size: 9px;
+    color: var(--muted);
+  }
+  .sec-hi  { color: var(--green); }
+  .sec-low { color: var(--orange); }
+  .sec-null{ color: var(--red); }
+
+  .legend { padding: 10px 12px; }
+  .legend-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 5px;
+    font-size: 9px;
+    color: var(--muted);
+  }
+  .dot {
+    width: 8px; height: 8px;
+    border-radius: 50%;
+    flex-shrink: 0;
+  }
+
+  /* ── Tooltip ── */
+  #tooltip {
+    position: fixed;
+    background: rgba(13,17,23,.95);
+    border: 1px solid var(--border);
+    padding: 8px 10px;
+    font-size: 10px;
+    pointer-events: none;
+    display: none;
+    z-index: 100;
+    min-width: 140px;
+  }
+  #tooltip .tt-name { font-size: 11px; color: var(--cyan); margin-bottom: 4px; }
+  #tooltip .tt-row { color: var(--muted); margin-bottom: 2px; }
+  #tooltip .tt-row span { color: var(--text); }
+
+  /* ── Corner brackets ── */
+  .bracket {
+    position: absolute;
+    width: 8px; height: 8px;
+    border-color: var(--cyan);
+    border-style: solid;
+    opacity: .5;
+  }
+  .bracket-tl { top: 4px; left: 4px; border-width: 1px 0 0 1px; }
+  .bracket-tr { top: 4px; right: 4px; border-width: 1px 1px 0 0; }
+  .bracket-bl { bottom: 4px; left: 4px; border-width: 0 0 1px 1px; }
+  .bracket-br { bottom: 4px; right: 4px; border-width: 0 1px 1px 0; }
+
+  .canvas-wrap { position: relative; flex: 1; overflow: hidden; }
+
+  /* ── Search ── */
+  .search-wrap { padding: 8px 12px; border-bottom: 1px solid var(--border); }
+  input.search {
+    width: 100%;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    color: var(--text);
+    font-family: inherit;
+    font-size: 10px;
+    padding: 5px 8px;
+    outline: none;
+  }
+  input.search:focus { border-color: var(--cyan); }
+  input.search::placeholder { color: var(--dim); }
+</style>
+</head>
+<body>
+
+<!-- Header -->
+<div class="header">
+  <div class="header-title">Aurora // Star Map</div>
+  <div class="header-sep">·</div>
+  <div class="header-stat">Systems <span id="sysCount">—</span></div>
+  <div class="header-sep">·</div>
+  <div class="header-stat">Jumps <span id="jumpCount">—</span></div>
+  <div class="header-sep">·</div>
+  <div class="header-stat">View <span id="viewMode">K-Space</span></div>
+  <div class="controls">
+    <button class="btn active" onclick="setView('flat')">2D</button>
+    <button class="btn" onclick="setView('3d')" style="opacity:.4;cursor:not-allowed" title="Coming soon">3D</button>
+    <button class="btn btn-gold" onclick="toggleSecColor()">SEC COLOR</button>
+    <button class="btn" onclick="resetView()">RESET</button>
+  </div>
+</div>
+
+<!-- Body -->
+<div class="body">
+  <div class="canvas-wrap">
+    <div class="bracket bracket-tl"></div>
+    <div class="bracket bracket-tr"></div>
+    <div class="bracket bracket-bl"></div>
+    <div class="bracket bracket-br"></div>
+    <canvas id="mapCanvas"></canvas>
+  </div>
+
+  <!-- Sidebar -->
+  <div class="sidebar">
+    <div class="search-wrap">
+      <input class="search" type="text" placeholder="Search system..." id="searchInput" />
+    </div>
+
+    <div class="sidebar-section">
+      <div class="sidebar-label">Selected System</div>
+      <div class="sidebar-value" id="selName">—</div>
+      <div class="sidebar-sub" id="selRegion">—</div>
+      <div class="sidebar-sub" id="selSec">—</div>
+      <div class="sidebar-sub" id="selJumps">—</div>
+    </div>
+
+    <div class="sidebar-section">
+      <div class="sidebar-label">Your Location</div>
+      <div class="sidebar-value sec-hi">Jita</div>
+      <div class="sidebar-sub">The Forge · 0.9</div>
+    </div>
+
+    <div class="legend">
+      <div class="sidebar-label" style="margin-bottom:8px">Security Status</div>
+      <div class="legend-row"><div class="dot" style="background:#33cc66"></div>High-sec (1.0 – 0.5)</div>
+      <div class="legend-row"><div class="dot" style="background:#ff6b00"></div>Low-sec (0.4 – 0.1)</div>
+      <div class="legend-row"><div class="dot" style="background:#ff4444"></div>Null-sec (0.0 and below)</div>
+      <div class="legend-row"><div class="dot" style="background:#00d4ff"></div>Current location</div>
+      <div class="legend-row"><div class="dot" style="background:#c8a84b"></div>Selected system</div>
+    </div>
+  </div>
+</div>
+
+<!-- Tooltip -->
+<div id="tooltip">
+  <div class="tt-name" id="ttName"></div>
+  <div class="tt-row">Region: <span id="ttRegion"></span></div>
+  <div class="tt-row">Security: <span id="ttSec"></span></div>
+  <div class="tt-row">Connections: <span id="ttConns"></span></div>
+</div>
+
+<script>
+// ── Sample data: real EVE k-space systems with approximate coords ──
+// Coords are scaled from actual ESI x/y/z (we project x/z → 2D, ignore y for flat view)
+// Real ESI coords are ~1e17 range; these are pre-normalized to [-1,1]
+const SYSTEMS = [
+  // The Forge / Jita cluster
+  { id: 30000142, name: "Jita",       x:  0.62, z:  0.48, sec: 0.9,  region: "The Forge",     conns: [30000144,30000138,30000148] },
+  { id: 30000144, name: "Perimeter",  x:  0.59, z:  0.44, sec: 0.9,  region: "The Forge",     conns: [30000142,30000145] },
+  { id: 30000138, name: "Ikuchi",     x:  0.65, z:  0.51, sec: 0.8,  region: "The Forge",     conns: [30000142,30000139] },
+  { id: 30000148, name: "Maurasi",    x:  0.64, z:  0.45, sec: 0.8,  region: "The Forge",     conns: [30000142,30000149] },
+  { id: 30000145, name: "Urlen",      x:  0.55, z:  0.42, sec: 0.8,  region: "The Forge",     conns: [30000144,30000146] },
+  { id: 30000146, name: "Sirseshin",  x:  0.52, z:  0.39, sec: 0.8,  region: "The Forge",     conns: [30000145] },
+  { id: 30000139, name: "Sobaseki",   x:  0.68, z:  0.53, sec: 0.7,  region: "The Forge",     conns: [30000138,30000140] },
+  { id: 30000140, name: "Obe",        x:  0.71, z:  0.55, sec: 0.7,  region: "The Forge",     conns: [30000139] },
+  { id: 30000149, name: "Muvolailen", x:  0.67, z:  0.43, sec: 0.7,  region: "The Forge",     conns: [30000148] },
+
+  // Amarr / Domain cluster
+  { id: 30002187, name: "Amarr",      x:  0.15, z: -0.30, sec: 1.0,  region: "Domain",        conns: [30002188,30002190,30002191] },
+  { id: 30002188, name: "Ashab",      x:  0.18, z: -0.27, sec: 0.8,  region: "Domain",        conns: [30002187,30002189] },
+  { id: 30002189, name: "Madirmilire",x:  0.20, z: -0.24, sec: 0.8,  region: "Domain",        conns: [30002188,30002192] },
+  { id: 30002190, name: "Sarum Prime",x:  0.12, z: -0.27, sec: 0.9,  region: "Domain",        conns: [30002187,30002193] },
+  { id: 30002191, name: "Ardallabier",x:  0.17, z: -0.33, sec: 0.7,  region: "Domain",        conns: [30002187,30002194] },
+  { id: 30002192, name: "Niarja",     x:  0.23, z: -0.22, sec: 0.5,  region: "Domain",        conns: [30002189,30002195] },
+  { id: 30002193, name: "Choonka",    x:  0.09, z: -0.25, sec: 0.7,  region: "Domain",        conns: [30002190] },
+  { id: 30002194, name: "Sehmy",      x:  0.14, z: -0.36, sec: 0.6,  region: "Domain",        conns: [30002191] },
+  { id: 30002195, name: "Kaaputenen", x:  0.26, z: -0.20, sec: 0.4,  region: "Domain",        conns: [30002192,30002196] },
+  { id: 30002196, name: "Romi",       x:  0.29, z: -0.18, sec: 0.4,  region: "The Bleak Lands",conns: [30002195] },
+
+  // Dodixie / Sinq Laison
+  { id: 30002659, name: "Dodixie",    x: -0.25, z:  0.10, sec: 0.9,  region: "Sinq Laison",   conns: [30002660,30002661,30002658] },
+  { id: 30002660, name: "Clellinon",  x: -0.22, z:  0.13, sec: 0.7,  region: "Sinq Laison",   conns: [30002659,30002662] },
+  { id: 30002661, name: "Botane",     x: -0.28, z:  0.13, sec: 0.7,  region: "Sinq Laison",   conns: [30002659] },
+  { id: 30002658, name: "Adacyne",    x: -0.27, z:  0.07, sec: 0.6,  region: "Sinq Laison",   conns: [30002659,30002657] },
+  { id: 30002657, name: "Parchanier", x: -0.29, z:  0.04, sec: 0.6,  region: "Sinq Laison",   conns: [30002658] },
+  { id: 30002662, name: "Pator",      x: -0.20, z:  0.16, sec: 0.8,  region: "Metropolis",    conns: [30002660,30002663] },
+  { id: 30002663, name: "Hek",        x: -0.18, z:  0.19, sec: 0.5,  region: "Metropolis",    conns: [30002662,30002664] },
+  { id: 30002664, name: "Uttindar",   x: -0.16, z:  0.22, sec: 0.4,  region: "Metropolis",    conns: [30002663] },
+
+  // Null-sec pockets
+  { id: 30001000, name: "HED-GP",     x:  0.35, z: -0.55, sec: -0.1, region: "Catch",         conns: [30001001,30001002] },
+  { id: 30001001, name: "GE-8JV",     x:  0.38, z: -0.58, sec: -0.2, region: "Catch",         conns: [30001000,30001003] },
+  { id: 30001002, name: "V-3YG7",     x:  0.32, z: -0.57, sec: -0.3, region: "Catch",         conns: [30001000,30001004] },
+  { id: 30001003, name: "G-7WUF",     x:  0.41, z: -0.60, sec: -0.4, region: "Catch",         conns: [30001001] },
+  { id: 30001004, name: "KFIE-Z",     x:  0.29, z: -0.59, sec: -0.5, region: "Catch",         conns: [30001002] },
+  { id: 30001005, name: "YHN-3K",     x:  0.44, z: -0.62, sec: -0.6, region: "Impass",        conns: [30001003,30001006] },
+  { id: 30001006, name: "3-LJW3",     x:  0.47, z: -0.65, sec: -0.7, region: "Impass",        conns: [30001005] },
+
+  // Pure Blind / Fade nullsec
+  { id: 30002002, name: "M-OEE8",     x:  0.72, z:  0.20, sec: -0.3, region: "Pure Blind",    conns: [30002003,30002004] },
+  { id: 30002003, name: "EC-P8R",     x:  0.75, z:  0.23, sec: -0.2, region: "Pure Blind",    conns: [30002002,30002005] },
+  { id: 30002004, name: "O-ZQDN",     x:  0.69, z:  0.23, sec: -0.4, region: "Pure Blind",    conns: [30002002] },
+  { id: 30002005, name: "X-7OMU",     x:  0.78, z:  0.26, sec: -0.1, region: "Fade",          conns: [30002003,30002006] },
+  { id: 30002006, name: "DO6H-Q",     x:  0.81, z:  0.29, sec: -0.2, region: "Fade",          conns: [30002005] },
+
+  // Lowsec belt — Molden Heath
+  { id: 30003003, name: "Bosboger",   x: -0.40, z:  0.35, sec: 0.4,  region: "Molden Heath",  conns: [30003004,30003005] },
+  { id: 30003004, name: "Oddelulf",   x: -0.43, z:  0.38, sec: 0.3,  region: "Molden Heath",  conns: [30003003,30003006] },
+  { id: 30003005, name: "Teonusude",  x: -0.37, z:  0.38, sec: 0.5,  region: "Molden Heath",  conns: [30003003] },
+  { id: 30003006, name: "Heild",      x: -0.46, z:  0.41, sec: 0.3,  region: "Molden Heath",  conns: [30003004,30003007] },
+  { id: 30003007, name: "Gulmorogod", x: -0.49, z:  0.44, sec: 0.2,  region: "Molden Heath",  conns: [30003006] },
+
+  // Caldari State — Lonetrek
+  { id: 30004004, name: "Nonni",      x:  0.77, z:  0.62, sec: 0.9,  region: "Lonetrek",      conns: [30004005,30000142] },
+  { id: 30004005, name: "Uedama",     x:  0.80, z:  0.65, sec: 0.5,  region: "Lonetrek",      conns: [30004004,30004006] },
+  { id: 30004006, name: "Sivala",     x:  0.83, z:  0.67, sec: 0.6,  region: "Lonetrek",      conns: [30004005,30004007] },
+  { id: 30004007, name: "Kaaputenen2",x:  0.86, z:  0.69, sec: 0.5,  region: "Lonetrek",      conns: [30004006] },
+
+  // Inter-regional bridges
+  { id: 30005005, name: "Rancer",     x:  0.05, z:  0.25, sec: 0.4,  region: "Sinq Laison",   conns: [30005006,30002659] },
+  { id: 30005006, name: "Tama",       x:  0.08, z:  0.27, sec: 0.3,  region: "The Citadel",   conns: [30005005,30005007] },
+  { id: 30005007, name: "Nourvukaiken",x: 0.11, z:  0.30, sec: 0.4,  region: "The Citadel",   conns: [30005006,30000142] },
+
+  // Delve (null)
+  { id: 30006001, name: "1DQ1-A",     x: -0.55, z: -0.70, sec: -0.9, region: "Delve",         conns: [30006002,30006003] },
+  { id: 30006002, name: "T5ZI-S",     x: -0.52, z: -0.67, sec: -0.8, region: "Delve",         conns: [30006001,30006004] },
+  { id: 30006003, name: "PUIG-F",     x: -0.58, z: -0.73, sec: -0.7, region: "Delve",         conns: [30006001] },
+  { id: 30006004, name: "NYM-GN",     x: -0.49, z: -0.64, sec: -0.9, region: "Delve",         conns: [30006002,30006005] },
+  { id: 30006005, name: "D-W7F0",     x: -0.46, z: -0.61, sec: -0.8, region: "Querious",      conns: [30006004] },
+];
+
+const sysMap = new Map(SYSTEMS.map(s => [s.id, s]));
+
+// ── State ──
+// zoom: 1.0 = systems fill ~90% of canvas. coords are normalized [-1,1].
+let canvas, ctx, W, H;
+let zoom = 1.0, offsetX = 0, offsetY = 0;
+let dragging = false, dragStart = {x:0,y:0}, dragOrigin = {x:0,y:0};
+let selected = null;
+let hoveredId = null;
+let colorBySec = true;
+const CURRENT_SYS = 30000142; // Jita
+
+function secColor(sec) {
+  if (sec >= 0.5) return '#33cc66';
+  if (sec >= 0.1) return '#ff6b00';
+  return '#ff4444';
+}
+function secLabel(sec) {
+  if (sec >= 0.5) return `<span class="sec-hi">${sec.toFixed(1)}</span>`;
+  if (sec >= 0.1) return `<span class="sec-low">${sec.toFixed(1)}</span>`;
+  return `<span class="sec-null">${sec.toFixed(1)}</span>`;
+}
+
+// wx/wy are normalized coords [-1, 1]
+function worldToCanvas(wx, wy) {
+  const span = Math.min(W, H) * 0.45;
+  const cx = W / 2 + offsetX + wx * span * zoom;
+  const cy = H / 2 + offsetY + wy * span * zoom;
+  return [cx, cy];
+}
+function canvasToWorld(cx, cy) {
+  const span = Math.min(W, H) * 0.45;
+  return [(cx - W/2 - offsetX) / (span * zoom), (cy - H/2 - offsetY) / (span * zoom)];
+}
+
+function draw() {
+  ctx.clearRect(0, 0, W, H);
+
+  // Background star field
+  ctx.fillStyle = '#080b10';
+  ctx.fillRect(0, 0, W, H);
+
+  // Subtle star field
+  const starSeed = 42;
+  for (let i = 0; i < 200; i++) {
+    const px = ((i * 1618 + starSeed * 31) % 1000) / 1000 * W;
+    const py = ((i * 2741 + starSeed * 17) % 1000) / 1000 * H;
+    const alpha = 0.1 + ((i * 97) % 100) / 400;
+    ctx.fillStyle = `rgba(180,200,220,${alpha})`;
+    ctx.fillRect(px, py, 1, 1);
+  }
+
+  // Draw jump connections (always visible)
+  ctx.lineWidth = 0.5;
+  const drawn = new Set();
+  for (const s of SYSTEMS) {
+    const [ax, ay] = worldToCanvas(s.x, s.z);
+    for (const tid of s.conns) {
+      const key = [Math.min(s.id, tid), Math.max(s.id, tid)].join('-');
+      if (drawn.has(key)) continue;
+      drawn.add(key);
+      const t = sysMap.get(tid);
+      if (!t) continue;
+      const [bx, by] = worldToCanvas(t.x, t.z);
+      ctx.strokeStyle = 'rgba(30,60,90,0.9)';
+      ctx.beginPath();
+      ctx.moveTo(ax, ay);
+      ctx.lineTo(bx, by);
+      ctx.stroke();
+    }
+  }
+
+  // Draw systems
+  for (const s of SYSTEMS) {
+    const [cx, cy] = worldToCanvas(s.x, s.z);
+    if (cx < -20 || cx > W + 20 || cy < -20 || cy > H + 20) continue;
+
+    const isSelected = selected && selected.id === s.id;
+    const isCurrent  = s.id === CURRENT_SYS;
+    const isHovered  = hoveredId === s.id;
+
+    let baseColor = colorBySec ? secColor(s.sec) : '#445566';
+    if (isCurrent)  baseColor = '#00d4ff';
+    if (isSelected) baseColor = '#c8a84b';
+
+    const r = isSelected ? 5 : isCurrent ? 5 : isHovered ? 4 : 2.5;
+
+    // Glow
+    if (isSelected || isCurrent || isHovered) {
+      const grd = ctx.createRadialGradient(cx, cy, 0, cx, cy, r * 4);
+      grd.addColorStop(0, baseColor + '44');
+      grd.addColorStop(1, 'transparent');
+      ctx.fillStyle = grd;
+      ctx.beginPath();
+      ctx.arc(cx, cy, r * 4, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    ctx.fillStyle = baseColor;
+    ctx.beginPath();
+    ctx.arc(cx, cy, r, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Labels at zoom >= 1.5 or for special systems
+    if (zoom >= 1.5 || isSelected || isCurrent) {
+      ctx.fillStyle = isSelected ? '#c8a84b' : isCurrent ? '#00d4ff' : 'rgba(180,200,220,0.7)';
+      ctx.font = `${isSelected || isCurrent ? 10 : 9}px 'Courier New'`;
+      ctx.textAlign = 'left';
+      ctx.fillText(s.name, cx + r + 4, cy + 4);
+    }
+  }
+
+  // Zoom indicator
+  ctx.fillStyle = 'rgba(26,35,50,.7)';
+  ctx.fillRect(16, H - 28, 110, 14);
+  ctx.fillStyle = '#445566';
+  ctx.font = '9px Courier New';
+  ctx.textAlign = 'left';
+  ctx.fillText(`ZOOM ${zoom.toFixed(2)}x  ·  ${SYSTEMS.length} sys`, 20, H - 18);
+}
+
+function findHovered(mx, my) {
+  let best = null, bestD = 12;
+  for (const s of SYSTEMS) {
+    const [cx, cy] = worldToCanvas(s.x, s.z);
+    const d = Math.hypot(mx - cx, my - cy);
+    if (d < bestD) { bestD = d; best = s; }
+  }
+  return best;
+}
+
+// ── Events ──
+function initCanvas() {
+  canvas = document.getElementById('mapCanvas');
+  ctx = canvas.getContext('2d');
+  resize();
+
+  canvas.addEventListener('mousedown', e => {
+    dragging = true;
+    dragStart = { x: e.clientX, y: e.clientY };
+    dragOrigin = { x: offsetX, y: offsetY };
+  });
+  canvas.addEventListener('mousemove', e => {
+    const rect = canvas.getBoundingClientRect();
+    const mx = e.clientX - rect.left;
+    const my = e.clientY - rect.top;
+    if (dragging) {
+      offsetX = dragOrigin.x + (e.clientX - dragStart.x);
+      offsetY = dragOrigin.y + (e.clientY - dragStart.y);
+      draw();
+    }
+    const h = findHovered(mx, my);
+    hoveredId = h ? h.id : null;
+    showTooltip(h, e.clientX, e.clientY);
+    draw();
+  });
+  canvas.addEventListener('mouseup', e => {
+    const moved = Math.hypot(e.clientX - dragStart.x, e.clientY - dragStart.y);
+    dragging = false;
+    if (moved < 5) {
+      const rect = canvas.getBoundingClientRect();
+      const h = findHovered(e.clientX - rect.left, e.clientY - rect.top);
+      selectSystem(h);
+    }
+  });
+  canvas.addEventListener('mouseleave', () => {
+    dragging = false;
+    hoveredId = null;
+    document.getElementById('tooltip').style.display = 'none';
+    draw();
+  });
+  canvas.addEventListener('wheel', e => {
+    e.preventDefault();
+    const factor = e.deltaY < 0 ? 1.12 : 0.89;
+    const rect = canvas.getBoundingClientRect();
+    const mx = e.clientX - rect.left;
+    const my = e.clientY - rect.top;
+    // zoom toward mouse pointer
+    const wx = mx - W/2 - offsetX;
+    const wy = my - H/2 - offsetY;
+    zoom = Math.max(0.3, Math.min(10, zoom * factor));
+    offsetX = mx - W/2 - wx * factor;
+    offsetY = my - H/2 - wy * factor;
+    draw();
+  }, { passive: false });
+
+  window.addEventListener('resize', () => { resize(); draw(); });
+}
+
+function resize() {
+  const wrap = canvas.parentElement;
+  W = canvas.width  = wrap.clientWidth;
+  H = canvas.height = wrap.clientHeight;
+}
+
+function showTooltip(sys, mx, my) {
+  const tt = document.getElementById('tooltip');
+  if (!sys) { tt.style.display = 'none'; return; }
+  document.getElementById('ttName').textContent   = sys.name;
+  document.getElementById('ttRegion').textContent  = sys.region;
+  document.getElementById('ttSec').innerHTML = secLabel(sys.sec);
+  document.getElementById('ttConns').textContent   = sys.conns.length;
+  tt.style.display = 'block';
+  tt.style.left = (mx + 14) + 'px';
+  tt.style.top  = (my - 10) + 'px';
+}
+
+function selectSystem(sys) {
+  selected = sys || null;
+  document.getElementById('selName').textContent   = sys ? sys.name  : '—';
+  document.getElementById('selRegion').textContent  = sys ? sys.region: '—';
+  document.getElementById('selSec').innerHTML = sys ? `Security: ${secLabel(sys.sec)}` : '—';
+  document.getElementById('selJumps').textContent   = sys ? `${sys.conns.length} connection(s)` : '—';
+  draw();
+}
+
+function setView(v) {
+  document.querySelectorAll('.controls .btn').forEach(b => b.classList.remove('active'));
+  event.target.classList.add('active');
+}
+
+function toggleSecColor() {
+  colorBySec = !colorBySec;
+  const btn = document.querySelector('.btn-gold');
+  btn.style.opacity = colorBySec ? '1' : '0.5';
+  draw();
+}
+
+function resetView() {
+  zoom = 1.0; offsetX = 0; offsetY = 0;
+  draw();
+}
+
+// Search
+document.addEventListener('DOMContentLoaded', () => {
+  document.getElementById('sysCount').textContent  = SYSTEMS.length;
+  document.getElementById('jumpCount').textContent = SYSTEMS.reduce((a,s) => a + s.conns.length, 0);
+
+  initCanvas();
+  zoom = 1.0;
+  draw();
+
+  document.getElementById('searchInput').addEventListener('input', e => {
+    const q = e.target.value.trim().toLowerCase();
+    if (!q) { selected = null; draw(); return; }
+    const match = SYSTEMS.find(s => s.name.toLowerCase().includes(q));
+    if (match) {
+      selected = match;
+      const span = Math.min(W, H) * 0.45;
+      offsetX = -(match.x * span * zoom);
+      offsetY = -(match.z * span * zoom);
+      selectSystem(match);
+    }
+  });
+});
+</script>
+</body>
+</html>

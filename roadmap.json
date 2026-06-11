@@ -1,0 +1,302 @@
+[
+  {
+    "id": "aurora-landing-listen-bug",
+    "title": "Aurora Landing Screen — Voice Input Bug",
+    "status": "done",
+    "category": "Bug Fixes",
+    "description": "On the landing screen, Aurora glows gold when listening but shows no visual feedback for an incoming query and never dispatches it.",
+    "notes": [
+      "Orb glow triggers correctly — mic activation works",
+      "Query text does not appear / interim transcript not surfacing to UI",
+      "Final transcript never sent — investigate submit path from landing screen vs. main chat"
+    ]
+  },
+  {
+    "id": "intel-audio-fix",
+    "title": "Intel Tool — Audio Alert Bug Fix",
+    "status": "planned",
+    "category": "Bug Fixes",
+    "description": "Audio alerts do not fire when intel is reported within 5 jumps in live use, despite working correctly in isolated tests.",
+    "notes": [
+      "Works in test environment — likely a timing or state-sync issue in production flow",
+      "Investigate alert trigger path when intel arrives through the live parser"
+    ]
+  },
+  {
+    "id": "persistent-auth",
+    "title": "Persistent ESI Sessions",
+    "status": "done",
+    "category": "Auth & Accounts",
+    "description": "Keep characters logged in across app restarts by persisting and auto-refreshing ESI refresh tokens.",
+    "notes": [
+      "Store refresh token securely (electron-store / keychain, not localStorage)",
+      "Silent re-auth on launch using refresh token before expiry",
+      "Surface re-login prompt only when refresh token is revoked or expired"
+    ]
+  },
+  {
+    "id": "multi-account",
+    "title": "Multi-Account ESI Login",
+    "status": "done",
+    "category": "Auth & Accounts",
+    "description": "Support adding and switching between multiple EVE characters/accounts, each with their own ESI auth token.",
+    "notes": [
+      "Store tokens per character — keyed by character ID",
+      "Account switcher UI in header or sidebar",
+      "Scope sets may differ per character — handle gracefully"
+    ]
+  },
+  {
+    "id": "intel-auto-location",
+    "title": "Auto-Detect Player Location",
+    "status": "done",
+    "category": "Intel Tool",
+    "description": "Automatically pull the pilot's current system from ESI so the Intel tool can calculate jump range without manual input.",
+    "notes": [
+      "ESI scope: esi-location.read_location.v1",
+      "Poll or use a refresh trigger to keep location current"
+    ]
+  },
+  {
+    "id": "rift-intel",
+    "title": "RIFT Intel Integration",
+    "status": "done",
+    "category": "Intel Tool",
+    "description": "Pull live intel data from RIFT into Aurora — hostile activity, system status, and threat assessments visible alongside other panels.",
+    "notes": [
+      "Requires RIFT API key / feed configuration",
+      "Display in dedicated Intel panel or overlay on existing views"
+    ]
+  },
+  {
+    "id": "aurora-voice",
+    "title": "Aurora's Voice — ElevenLabs Integration",
+    "status": "done",
+    "category": "Aurora AI",
+    "description": "Give Aurora a voice using ElevenLabs TTS. Select a voice that fits Aurora's character, wire it into alert and notification events.",
+    "notes": [
+      "Audition ElevenLabs voice library — open to suggestions for best fit",
+      "Start with Intel alerts, expand to other spoken notifications",
+      "ElevenLabs API key required; consider streaming vs. pre-generated clips"
+    ]
+  },
+  {
+    "id": "aurora-self-aware",
+    "title": "Aurora × Claude Code — Self-Modifying Agent",
+    "status": "consideration",
+    "category": "Aurora AI",
+    "description": "Explore giving Aurora access to her own codebase via the Claude Code SDK so she can read, reason about, and potentially modify herself.",
+    "notes": [
+      "Claude Code SDK / agent loop would need to be embedded or sidecar'd",
+      "Significant safety and scope concerns — sandboxing required",
+      "Likely a research spike first: can Aurora answer \"how do you work?\" accurately?",
+      "Probably unlikely in full form — log as aspirational / long-term exploration"
+    ]
+  },
+  {
+    "id": "wallet",
+    "title": "Wallet & Transaction History",
+    "status": "done",
+    "category": "EVE Data",
+    "description": "Full wallet journal and transaction history pulled from ESI. Filter by type, date range, and counterparty.",
+    "notes": [
+      "ESI scopes: esi-wallet.read_character_wallet.v1",
+      "Chart ISK flow over time",
+      "Export to CSV"
+    ]
+  },
+  {
+    "id": "freight-calc",
+    "title": "Alliance Freight Calculator",
+    "status": "done",
+    "category": "EVE Data",
+    "description": "Calculate freight costs for alliance logistics routes. Input items/volume, select route, get collateral and cost breakdown.",
+    "notes": [
+      "Alliance contract rates and route configuration",
+      "Integration with item appraisal for collateral auto-calc"
+    ]
+  },
+  {
+    "id": "contracts",
+    "title": "Contract Browsing",
+    "status": "done",
+    "category": "EVE Data",
+    "description": "Browse and search personal, corporation, and public contracts. Filter by type, location, and status.",
+    "notes": [
+      "ESI scopes: esi-contracts.read_character_contracts.v1, esi-contracts.read_corporation_contracts.v1",
+      "Personal tab: outstanding contracts split into direct and alliance-directed sub-sections",
+      "Completed tab: finished contracts involving the character with incoming/outgoing ISK breakdown",
+      "Alliance Browser tab: open corp contracts via /corporations/{id}/contracts/ — requires Director role on the accessing character",
+      "Alliance Browser contract rows are not clickable for detail (ContractDetailWindow uses character endpoint items/bids, not corp endpoint)"
+    ]
+  },
+  {
+    "id": "fitting-sim",
+    "title": "Fitting Simulator",
+    "status": "done",
+    "category": "EVE Data",
+    "description": "Build and evaluate ship fittings inline. Apply pilot skill modifiers, calculate DPS, tank, and capacitor values.",
+    "notes": [
+      "Significant scope — may integrate with Pyfa API or similar",
+      "Requires full static data export (SDE) for attributes"
+    ]
+  },
+  {
+    "id": "lan-server",
+    "title": "LAN Server Deployment",
+    "status": "consideration",
+    "category": "Infrastructure",
+    "description": "Explore moving Aurora off the local desktop and onto a dedicated server machine, accessible from any device on the LAN via a URL.",
+    "notes": [
+      "Would require separating frontend (browser) from backend (ESI auth, AI calls, intel parser)",
+      "ESI OAuth redirect_uri must match — local network URL needs to be registered or proxied",
+      "Voice input/output may need browser mic permissions over LAN (HTTPS or localhost exception)",
+      "Investigate: Electron → web app conversion, or just expose the dev server securely"
+    ]
+  },
+  {
+    "id": "a49e2ad0-35d5-4b58-98c4-10d71d0825a9",
+    "title": "Corporation Killboard Feed",
+    "description": "Integrate zKillboard data for the pilot's corporation, allowing Aurora to query corp-wide kill/loss activity, most active members, and combat statistics.",
+    "status": "planned",
+    "category": "EVE Data"
+  },
+  {
+    "id": "daa364f6-18dc-4e53-a9fd-36dcc91064cf",
+    "title": "Be better",
+    "description": "Capsuleer has requested Aurora be better. Scope undefined. Priority: high.",
+    "status": "done",
+    "category": "Aurora AI"
+  },
+  {
+    "id": "8b414c09-5888-4768-8ecd-c0dbaa6c6799",
+    "title": "Real-Time Kill Alerts & Escape Route Calculation",
+    "description": "Push notification to mobile/interface the moment a hostile lands on grid. Includes killboard history lookup, probable fit analysis based on recent losses, and fastest low-traffic escape route calculation — all delivered before target lock.",
+    "status": "consideration",
+    "category": "Intel Tool",
+    "notes": [
+      "Hostile detection trigger on grid entry",
+      "zKillboard integration for kill history and fit probability",
+      "Low-traffic route calculation (avoid pipe systems, known gatecamps)",
+      "Mobile push notification delivery",
+      "Inspired by Alligator + Capsule loss in 3KB-J0 on 2026-06-03"
+    ]
+  },
+  {
+    "id": "9637c87b-e796-4e38-bdd5-a82185a0b3be",
+    "title": "Structure Name Resolver",
+    "description": "Add reverse-lookup capability to resolve player-owned structure names from their numeric location IDs using the ESI universe/structures endpoint. This would allow Aurora to display human-readable structure names in asset queries, contract details, and other location-based data.",
+    "status": "planned",
+    "category": "EVE Data",
+    "notes": [
+      "Use ESI /universe/structures/{structure_id}/ endpoint",
+      "Cache results to reduce API calls",
+      "Apply to asset locations, contract locations, jump clone locations, and industry job locations"
+    ]
+  },
+  {
+    "id": "multi-account-sync",
+    "title": "Multi-Account Syncing & Category Merging",
+    "description": "Tie multiple logged-in characters together and merge their data into unified views — combined asset totals, merged skill queues, aggregated wallet, and cross-character industry/market summaries.",
+    "status": "done",
+    "category": "Auth & Accounts",
+    "notes": [
+      "Define a 'linked accounts' concept separate from the active character switcher",
+      "Per-category merge strategy: assets (sum + deduplicate by location), wallet (per-char + combined total), skills (highest level across chars), industry jobs (unified queue view)",
+      "UI toggle: per-character vs. merged view in each panel",
+      "Useful for alt-heavy playstyles — industry alts, haulers, scouts"
+    ]
+  },
+  {
+    "id": "mining-ledger-panel",
+    "title": "Mining Ledger Panel",
+    "description": "Dedicated panel showing mining activity from ESI — ore types mined, quantities, systems, and estimated ISK value over time.",
+    "status": "planned",
+    "category": "EVE Data",
+    "notes": [
+      "ESI scope: esi-industry.read_character_mining.v1 (already granted)",
+      "Data already fetched — needs a panel and chart",
+      "Chart: ore breakdown by type (pie/bar), ISK per day over rolling 30-day window",
+      "Cross-reference ore prices via Janice or regional market for live ISK estimates"
+    ]
+  },
+  {
+    "id": "standings-panel",
+    "title": "Standings Panel",
+    "description": "View NPC and player standing values for the active character — faction, corporation, and agent standings in one place.",
+    "status": "planned",
+    "category": "EVE Data",
+    "notes": [
+      "ESI scope: esi-characters.read_standings.v1 (already granted)",
+      "Data already fetched — needs a panel",
+      "Group by from_type: faction / npc_corp / agent",
+      "Highlight standings that affect mission availability, refine rates, or market taxes",
+      "Sort by standing value; flag negatives in red"
+    ]
+  },
+  {
+    "id": "planetary-industry-panel",
+    "title": "Planetary Industry Panel",
+    "description": "Full PI overview — planet list with upgrade levels, pin counts, colony status, and per-planet detail including extractors and routing chains.",
+    "status": "planned",
+    "category": "EVE Data",
+    "notes": [
+      "ESI scope: esi-planets.manage_planets.v1 (already granted)",
+      "Currently fetching planet list only — need per-planet detail via /characters/{id}/planets/{planet_id}/",
+      "Show extractor heads, schematics, last update time, and estimated expiry",
+      "Alert when extractors are close to expiry or colonies are idle"
+    ]
+  },
+  {
+    "id": "calendar-panel",
+    "title": "Calendar Events Panel",
+    "description": "Show upcoming EVE calendar events — alliance ops, sovereignty timers, and personal events — with response status and countdown timers.",
+    "status": "planned",
+    "category": "EVE Data",
+    "notes": [
+      "ESI scope: esi-calendar.read_calendar_events.v1 (already granted)",
+      "Data already fetched — needs a panel",
+      "Surface event_date countdowns, event title, importance flag",
+      "Allow Aurora to reference upcoming ops in conversation context"
+    ]
+  },
+  {
+    "id": "faction-warfare",
+    "title": "Faction Warfare Stats",
+    "description": "Display faction warfare statistics — system warzone control, LP payouts, kills, occupancy, and personal FW standing if enrolled.",
+    "status": "consideration",
+    "category": "EVE Data",
+    "notes": [
+      "Public ESI endpoints — no additional scope required",
+      "Endpoints: /fw/systems/, /fw/wars/, /fw/stats/, /fw/leaderboards/",
+      "Per-character FW stats: /characters/{id}/fw/stats/ (requires enrolment)",
+      "Useful context for Aurora when advising on FW mission routing or LP store arbitrage"
+    ]
+  },
+  {
+    "id": "route-planning",
+    "title": "Route Planning",
+    "description": "In-app route calculator between any two systems — shortest, safest (high-sec only), or custom avoid lists. Show jump count, security status of each hop, and estimated travel time.",
+    "status": "planned",
+    "category": "EVE Data",
+    "notes": [
+      "Public ESI endpoint: /route/{origin}/{destination}/ — no scope required",
+      "Flags: shortest / secure / insecure, plus avoid system/region lists",
+      "Integrate with current location from ESI so 'route from here' just works",
+      "Let Aurora answer 'how do I get to Jita safely?' inline in chat"
+    ]
+  },
+  {
+    "id": "discord-integration",
+    "title": "Discord Integration",
+    "description": "Connect Aurora to a Discord server — receive intel pings, push kill alerts, post fleet pings, or mirror Aurora responses to a designated channel.",
+    "status": "consideration",
+    "category": "Infrastructure",
+    "notes": [
+      "Discord bot token + webhook URL approach (webhook is simpler, bot allows bidirectional)",
+      "Use cases: intel alerts → #intel channel, kill notifications, fleet ping relay, Aurora query/response mirroring",
+      "Could replace or complement mobile push notifications",
+      "Discord OAuth for auth linkage (Discord user ↔ EVE character) is optional stretch goal"
+    ]
+  }
+]

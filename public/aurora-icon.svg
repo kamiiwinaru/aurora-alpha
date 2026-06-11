@@ -1,0 +1,83 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <defs>
+    <radialGradient id="bg" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#0d1a2e"/>
+      <stop offset="100%" stop-color="#080b10"/>
+    </radialGradient>
+    <radialGradient id="glow" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#00d4ff" stop-opacity="0.3"/>
+      <stop offset="100%" stop-color="#00d4ff" stop-opacity="0"/>
+    </radialGradient>
+    <filter id="blur">
+      <feGaussianBlur stdDeviation="3"/>
+    </filter>
+    <filter id="glow-filter">
+      <feGaussianBlur stdDeviation="2" result="blur"/>
+      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+
+  <!-- Background -->
+  <rect width="256" height="256" rx="24" fill="url(#bg)"/>
+
+  <!-- Glow core -->
+  <circle cx="128" cy="128" r="80" fill="url(#glow)" filter="url(#blur)"/>
+
+  <!-- Outer hex ring -->
+  <polygon
+    points="128,28 214,78 214,178 128,228 42,178 42,78"
+    fill="none"
+    stroke="#00d4ff"
+    stroke-width="1.5"
+    stroke-opacity="0.4"
+  />
+
+  <!-- Inner hex ring -->
+  <polygon
+    points="128,52 196,91 196,169 128,208 60,169 60,91"
+    fill="none"
+    stroke="#00d4ff"
+    stroke-width="1"
+    stroke-opacity="0.2"
+  />
+
+  <!-- Corner tick marks on outer hex -->
+  <g stroke="#00d4ff" stroke-width="2" stroke-opacity="0.8" filter="url(#glow-filter)">
+    <line x1="128" y1="28" x2="128" y2="44"/>
+    <line x1="214" y1="78" x2="200" y2="86"/>
+    <line x1="214" y1="178" x2="200" y2="170"/>
+    <line x1="128" y1="228" x2="128" y2="212"/>
+    <line x1="42" y1="178" x2="56" y2="170"/>
+    <line x1="42" y1="78" x2="56" y2="86"/>
+  </g>
+
+  <!-- Central A -->
+  <text
+    x="128"
+    y="152"
+    text-anchor="middle"
+    font-family="'Share Tech Mono', 'Courier New', monospace"
+    font-size="96"
+    font-weight="700"
+    fill="#00d4ff"
+    filter="url(#glow-filter)"
+    letter-spacing="-4"
+  >A</text>
+
+  <!-- Subtle scanline bands -->
+  <rect x="42" y="78" width="172" height="1" fill="#00d4ff" fill-opacity="0.06"/>
+  <rect x="42" y="128" width="172" height="1" fill="#00d4ff" fill-opacity="0.06"/>
+  <rect x="42" y="178" width="172" height="1" fill="#00d4ff" fill-opacity="0.06"/>
+
+  <!-- Bottom label -->
+  <text
+    x="128"
+    y="196"
+    text-anchor="middle"
+    font-family="'Share Tech Mono', 'Courier New', monospace"
+    font-size="13"
+    fill="#00d4ff"
+    fill-opacity="0.6"
+    letter-spacing="4"
+  >AURORA</text>
+</svg>
