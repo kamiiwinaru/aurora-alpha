@@ -11,3 +11,10 @@ todos.json
 roadmap.json
 pronunciations.json
 structures.json
+.claude/
+scripts/.rebuild-log.txt
+bot/
+public/preview-*.html
+Aurora.bat
+CLAUDE.md
+SETUP.md
