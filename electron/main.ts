@@ -32,6 +32,19 @@ const REQUIRED_KEYS = ['ANTHROPIC_API_KEY']
 const EVE_CLIENT_ID     = '46e3ae80efea49d88caf2207c3ab62ac'
 const EVE_CLIENT_SECRET = 'eat_1K56fWSWiqCRjQU5jgfARCZpxxp3xJd1a_4Ns6Co'
 
+function ensureFixedKeys() {
+  // Always write app-level credentials so the server has them even before user setup
+  const existing = readEnvValues()
+  const needsWrite =
+    existing['EVE_CLIENT_ID']     !== EVE_CLIENT_ID ||
+    existing['EVE_CLIENT_SECRET'] !== EVE_CLIENT_SECRET ||
+    existing['JANICE_API_KEY']    !== 'G9KwKq3465588VPd6747t95Zh94q3W2E' ||
+    !existing['EVE_CALLBACK_URL']
+  if (needsWrite) {
+    writeEnvValues(existing)
+  }
+}
+
 function loadEnv() {
   if (existsSync(envPath)) {
     dotenv.config({ path: envPath, override: true })
@@ -303,6 +316,7 @@ app.on('second-instance', () => {
 })
 
 app.whenReady().then(() => {
+  ensureFixedKeys()
   loadEnv()
   startExpressServer()
   setTimeout(createWindow, isDev ? 1500 : 2000)
