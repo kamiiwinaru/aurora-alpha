@@ -1,0 +1,208 @@
+[
+  {
+    "id": "aurora-landing-listen-bug",
+    "title": "Aurora Landing Screen — Voice Input Bug",
+    "status": "planned",
+    "category": "Bug Fixes",
+    "description": "On the landing screen, Aurora glows gold when listening but shows no visual feedback for an incoming query and never dispatches it.",
+    "notes": [
+      "Orb glow triggers correctly — mic activation works",
+      "Query text does not appear / interim transcript not surfacing to UI",
+      "Final transcript never sent — investigate submit path from landing screen vs. main chat"
+    ]
+  },
+  {
+    "id": "intel-audio-fix",
+    "title": "Intel Tool — Audio Alert Bug Fix",
+    "status": "planned",
+    "category": "Bug Fixes",
+    "description": "Audio alerts do not fire when intel is reported within 5 jumps in live use, despite working correctly in isolated tests.",
+    "notes": [
+      "Works in test environment — likely a timing or state-sync issue in production flow",
+      "Investigate alert trigger path when intel arrives through the live parser"
+    ]
+  },
+  {
+    "id": "persistent-auth",
+    "title": "Persistent ESI Sessions",
+    "status": "done",
+    "category": "Auth & Accounts",
+    "description": "Keep characters logged in across app restarts by persisting and auto-refreshing ESI refresh tokens.",
+    "notes": [
+      "Store refresh token securely (electron-store / keychain, not localStorage)",
+      "Silent re-auth on launch using refresh token before expiry",
+      "Surface re-login prompt only when refresh token is revoked or expired"
+    ]
+  },
+  {
+    "id": "multi-account",
+    "title": "Multi-Account ESI Login",
+    "status": "done",
+    "category": "Auth & Accounts",
+    "description": "Support adding and switching between multiple EVE characters/accounts, each with their own ESI auth token.",
+    "notes": [
+      "Store tokens per character — keyed by character ID",
+      "Account switcher UI in header or sidebar",
+      "Scope sets may differ per character — handle gracefully"
+    ]
+  },
+  {
+    "id": "intel-auto-location",
+    "title": "Auto-Detect Player Location",
+    "status": "done",
+    "category": "Intel Tool",
+    "description": "Automatically pull the pilot's current system from ESI so the Intel tool can calculate jump range without manual input.",
+    "notes": [
+      "ESI scope: esi-location.read_location.v1",
+      "Poll or use a refresh trigger to keep location current"
+    ]
+  },
+  {
+    "id": "rift-intel",
+    "title": "RIFT Intel Integration",
+    "status": "done",
+    "category": "Intel Tool",
+    "description": "Pull live intel data from RIFT into Aurora — hostile activity, system status, and threat assessments visible alongside other panels.",
+    "notes": [
+      "Requires RIFT API key / feed configuration",
+      "Display in dedicated Intel panel or overlay on existing views"
+    ]
+  },
+  {
+    "id": "aurora-voice",
+    "title": "Aurora's Voice — ElevenLabs Integration",
+    "status": "done",
+    "category": "Aurora AI",
+    "description": "Give Aurora a voice using ElevenLabs TTS. Select a voice that fits Aurora's character, wire it into alert and notification events.",
+    "notes": [
+      "Audition ElevenLabs voice library — open to suggestions for best fit",
+      "Start with Intel alerts, expand to other spoken notifications",
+      "ElevenLabs API key required; consider streaming vs. pre-generated clips"
+    ]
+  },
+  {
+    "id": "aurora-self-aware",
+    "title": "Aurora × Claude Code — Self-Modifying Agent",
+    "status": "done",
+    "category": "Aurora AI",
+    "description": "Explore giving Aurora access to her own codebase via the Claude Code SDK so she can read, reason about, and potentially modify herself.",
+    "notes": [
+      "Claude Code SDK / agent loop would need to be embedded or sidecar'd",
+      "Significant safety and scope concerns — sandboxing required",
+      "Likely a research spike first: can Aurora answer \"how do you work?\" accurately?",
+      "Probably unlikely in full form — log as aspirational / long-term exploration"
+    ]
+  },
+  {
+    "id": "wallet",
+    "title": "Wallet & Transaction History",
+    "status": "done",
+    "category": "EVE Data",
+    "description": "Full wallet journal and transaction history pulled from ESI. Filter by type, date range, and counterparty.",
+    "notes": [
+      "ESI scopes: esi-wallet.read_character_wallet.v1",
+      "Chart ISK flow over time",
+      "Export to CSV"
+    ]
+  },
+  {
+    "id": "freight-calc",
+    "title": "Alliance Freight Calculator",
+    "status": "done",
+    "category": "EVE Data",
+    "description": "Calculate freight costs for alliance logistics routes. Input items/volume, select route, get collateral and cost breakdown.",
+    "notes": [
+      "Alliance contract rates and route configuration",
+      "Integration with item appraisal for collateral auto-calc"
+    ]
+  },
+  {
+    "id": "contracts",
+    "title": "Contract Browsing",
+    "status": "done",
+    "category": "EVE Data",
+    "description": "Browse and search personal, corporation, and public contracts. Filter by type, location, and status.",
+    "notes": [
+      "ESI scopes: esi-contracts.read_character_contracts.v1",
+      "Scope of public contract search TBD"
+    ]
+  },
+  {
+    "id": "fitting-sim",
+    "title": "Fitting Simulator",
+    "status": "done",
+    "category": "EVE Data",
+    "description": "Build and evaluate ship fittings inline. Apply pilot skill modifiers, calculate DPS, tank, and capacitor values.",
+    "notes": [
+      "Significant scope — may integrate with Pyfa API or similar",
+      "Requires full static data export (SDE) for attributes"
+    ]
+  },
+  {
+    "id": "lan-server",
+    "title": "LAN Server Deployment",
+    "status": "consideration",
+    "category": "Infrastructure",
+    "description": "Explore moving Aurora off the local desktop and onto a dedicated server machine, accessible from any device on the LAN via a URL.",
+    "notes": [
+      "Would require separating frontend (browser) from backend (ESI auth, AI calls, intel parser)",
+      "ESI OAuth redirect_uri must match — local network URL needs to be registered or proxied",
+      "Voice input/output may need browser mic permissions over LAN (HTTPS or localhost exception)",
+      "Investigate: Electron → web app conversion, or just expose the dev server securely"
+    ]
+  },
+  {
+    "id": "734bb3e8-1a86-4901-ab4e-08549823c997",
+    "title": "Settings Cog Menu — Standalone Version",
+    "description": "Add a settings/cog icon at the top of the interface (next to minimize button) for user-configurable options. Initial focus is microphone device selection, previously supported via Chrome APIs, but the menu should be extensible for future settings.",
+    "status": "done",
+    "category": "Aurora AI",
+    "notes": [
+      "Microphone device selector — enumerate available input devices via MediaDevices.enumerateDevices() and allow user to pick",
+      "Cog icon positioned in top bar next to minimize button",
+      "Menu should be extensible for future adjustable options (voice sensitivity, TTS voice, theme, etc.)",
+      "Chrome previously supported mic selection natively — replicate this in the standalone UI",
+      "Persist selected device across sessions (localStorage or config file)"
+    ]
+  },
+  {
+    "id": "0a1e4b77-9367-472c-88bf-03c0211b1ab9",
+    "title": "Region Search on Map",
+    "description": "Add a search feature to the Aurora map allowing pilots to search for and navigate to specific regions by name. Should highlight or focus the map view on the matched region.",
+    "status": "done",
+    "category": "Intel Tool",
+    "notes": [
+      "Search input field on the map UI",
+      "Match against region names (and optionally constellation/system names)",
+      "Pan/zoom map to centre on matched region",
+      "Highlight matched region visually"
+    ]
+  },
+  {
+    "id": "0d86550e-bf94-42a5-8cdc-4f700297af34",
+    "title": "Alpha Tester Feedback Tool",
+    "description": "In-app feedback submission tool for alpha testers to report bugs, suggest improvements, and rate their experience without leaving the Aurora interface.",
+    "status": "planned",
+    "category": "General",
+    "notes": [
+      "Simple form or floating button accessible at all times",
+      "Fields: category (bug/suggestion/other), description, optional screenshot",
+      "Submissions routed to dev dashboard or issue tracker",
+      "Optional: tester identity/API key attached automatically for context"
+    ]
+  },
+  {
+    "id": "cd53fd98-5143-4770-be7f-66e6d299a660",
+    "title": "Private Ship Fitting File Sharing",
+    "description": "Allow pilots to share ship fittings privately via generated links. Recipients can view the fitting without needing an account or API key.",
+    "status": "planned",
+    "category": "General",
+    "notes": [
+      "Link-based sharing — generate a unique URL per fitting",
+      "Links can be set to public or private (unlisted)",
+      "Expiry options under consideration",
+      "Format support (EFT/ESI) under consideration",
+      "ACL/per-user access control under consideration"
+    ]
+  }
+]
