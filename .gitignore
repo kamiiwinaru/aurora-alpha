@@ -8,9 +8,8 @@ release/
 *.log
 fits.json
 todos.json
-roadmap.json
-pronunciations.json
 structures.json
+skills_*.json
 .claude/
 scripts/.rebuild-log.txt
 bot/

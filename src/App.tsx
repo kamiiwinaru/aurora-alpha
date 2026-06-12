@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from 'react'
+import { version } from '../package.json'
 import { motion } from 'framer-motion'
-import { Sun, Moon, Brain, TrendingUp } from 'lucide-react'
+import { Brain, TrendingUp } from 'lucide-react'
 
 import Sidebar from './components/Sidebar'
 import ChatWindow from './components/ChatWindow'
@@ -24,6 +25,7 @@ import VentureGame from './components/VentureGame'
 import WalletWindow from './components/panels/WalletWindow'
 import UsageBar from './components/UsageBar'
 import TitleBar from './components/TitleBar'
+import OptionsMenu from './components/OptionsMenu'
 import SetupScreen from './components/SetupScreen'
 import { useChat } from './hooks/useChat'
 import { useEve } from './hooks/useEve'
@@ -377,25 +379,16 @@ export default function App() {
           <div className="hidden md:flex items-center gap-1 text-eve-dim text-[10px]">
             <span>CAPSULEER INTELLIGENCE SYSTEM</span>
             <span className="mx-1">·</span>
-            <span>v1.0.0</span>
+            <span>v{version}</span>
           </div>
         </div>
         <div className="flex items-center gap-3 text-[10px] text-eve-muted">
-          <a
-            href="/preview-brain.html"
-            target="_blank"
-            rel="noopener noreferrer"
+          <button
+            onClick={() => window.open('/preview-brain.html', '_blank', 'noopener,noreferrer')}
             title="Aurora Brain Map"
             className="text-eve-muted hover:text-eve-cyan transition-colors p-0.5"
           >
             <Brain size={13} />
-          </a>
-          <button
-            onClick={() => setDarkMode(v => !v)}
-            title={darkMode ? 'Switch to light mode' : 'Switch to dark mode'}
-            className="text-eve-muted hover:text-eve-cyan transition-colors p-0.5"
-          >
-            {darkMode ? <Sun size={13} /> : <Moon size={13} />}
           </button>
           <div className="hidden sm:flex items-center gap-1.5">
             <motion.div
@@ -406,6 +399,8 @@ export default function App() {
             <span>NEW EDEN · YC {new Date().getFullYear() - 1898}</span>
           </div>
           <span className="text-eve-dim">{new Date().toUTCString().slice(17, 25)} UTC</span>
+
+          <OptionsMenu darkMode={darkMode} setDarkMode={setDarkMode} />
 
           {/* Electron window controls — only shown inside the app */}
           {window.electronAPI && (
@@ -542,6 +537,7 @@ export default function App() {
                     skillQueue={eve.skillQueue}
                     loading={eve.loading}
                     onRefresh={eve.refreshAllCharacters}
+                    characterId={eve.characters[0]?.characterId}
                   />
                 )}
                 {activePanel === 'industry' && (

@@ -32,6 +32,19 @@ const REQUIRED_KEYS = ['ANTHROPIC_API_KEY']
 const EVE_CLIENT_ID     = '46e3ae80efea49d88caf2207c3ab62ac'
 const EVE_CLIENT_SECRET = 'eat_1K56fWSWiqCRjQU5jgfARCZpxxp3xJd1a_4Ns6Co'
 
+function ensureFixedKeys() {
+  // Always write app-level credentials so the server has them even before user setup
+  const existing = readEnvValues()
+  const needsWrite =
+    existing['EVE_CLIENT_ID']     !== EVE_CLIENT_ID ||
+    existing['EVE_CLIENT_SECRET'] !== EVE_CLIENT_SECRET ||
+    existing['JANICE_API_KEY']    !== 'G9KwKq3465588VPd6747t95Zh94q3W2E' ||
+    !existing['EVE_CALLBACK_URL']
+  if (needsWrite) {
+    writeEnvValues(existing)
+  }
+}
+
 function loadEnv() {
   if (existsSync(envPath)) {
     dotenv.config({ path: envPath, override: true })
@@ -152,7 +165,8 @@ function createWindow() {
   ;(global as any).__auroraLog = (msg: string) => log(`[server] ${msg}`)
 
   ;(global as any).__auroraOAuthCallback = (params: string) => {
-    log(`OAuth callback received: ${params.slice(0, 80)}...`)
+    const redacted = params.replace(/(eve_access_token|eve_refresh_token|code)=[^&]*/g, '$1=[redacted]')
+    log(`OAuth callback received: ${redacted}`)
     const base = isDev ? 'http://localhost:5173' : 'http://localhost:3001'
     mainWindow?.loadURL(`${base}/?${params}`)
   }
@@ -177,15 +191,14 @@ function createWindow() {
     mainWindow.setFullScreen(!mainWindow.isFullScreen())
   })
 
-  // F12 opens DevTools in all builds for debugging
-  globalShortcut.register('F12', () => {
-    mainWindow?.webContents.openDevTools({ mode: 'detach' })
-  })
-
-  // Also open DevTools automatically on any failed load
-  mainWindow.webContents.on('did-fail-load', () => {
-    mainWindow?.webContents.openDevTools({ mode: 'detach' })
-  })
+  if (isDev) {
+    globalShortcut.register('F12', () => {
+      mainWindow?.webContents.openDevTools({ mode: 'detach' })
+    })
+    mainWindow.webContents.on('did-fail-load', () => {
+      mainWindow?.webContents.openDevTools({ mode: 'detach' })
+    })
+  }
 
   // Log all navigation events to help debug OAuth flow
   mainWindow.webContents.on('will-navigate', (_e, url) => {
@@ -269,9 +282,22 @@ ipcMain.handle('window:isMaximized', () => mainWindow?.isMaximized() ?? false)
 // ── Setup / env IPC ───────────────────────────────────────────────────────
 ipcMain.handle('setup:getMissing', () => getMissingKeys())
 ipcMain.on('setup:getMissingSync', (e) => { e.returnValue = getMissingKeys() })
-ipcMain.handle('setup:getValues', () => readEnvValues())
+ipcMain.handle('setup:getValues', () => {
+  const vals = readEnvValues()
+  return {
+    ANTHROPIC_API_KEY:    vals['ANTHROPIC_API_KEY']    ? '••••configured••••' : '',
+    ELEVENLABS_API_KEY:   vals['ELEVENLABS_API_KEY']   ? '••••configured••••' : '',
+    ELEVENLABS_VOICE_ID:  vals['ELEVENLABS_VOICE_ID']  || '',
+  }
+})
 ipcMain.handle('setup:save', (_e, values: Record<string, string>) => {
-  writeEnvValues(values)
+  const existing = readEnvValues()
+  const merged = { ...existing, ...values }
+  // If user left a field blank, keep the existing value
+  for (const k of Object.keys(existing)) {
+    if (!values[k]) merged[k] = existing[k]
+  }
+  writeEnvValues(merged)
   loadEnv()
   const remaining = getMissingKeys()
   if (remaining.length === 0) {
@@ -303,6 +329,7 @@ app.on('second-instance', () => {
 })
 
 app.whenReady().then(() => {
+  ensureFixedKeys()
   loadEnv()
   startExpressServer()
   setTimeout(createWindow, isDev ? 1500 : 2000)

@@ -247,7 +247,7 @@
   </div>
 
   <script>
-    const REQUIRED = ['ANTHROPIC_API_KEY', 'EVE_CLIENT_ID', 'EVE_CLIENT_SECRET']
+    const REQUIRED = ['ANTHROPIC_API_KEY']
 
     // Pre-populate from existing .env values if any
     window.addEventListener('DOMContentLoaded', async () => {
@@ -255,7 +255,12 @@
         const existing = await window.electronAPI.getEnvValues()
         for (const [k, v] of Object.entries(existing)) {
           const el = document.getElementById(k)
-          if (el) el.value = v
+          if (!el) continue
+          if (v === '••••configured••••') {
+            el.placeholder = 'already configured — leave blank to keep'
+          } else if (v) {
+            el.value = v
+          }
         }
         updateBtn()
       } catch (e) {}

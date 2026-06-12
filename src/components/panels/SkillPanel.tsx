@@ -4,11 +4,14 @@ import { RefreshCw, Copy, Check, Loader2, Save, Trash2, ChevronDown } from 'luci
 import type { EveSkill, EveSkillQueueItem } from '../../types'
 import { timeUntil } from '../../lib/eve-esi'
 
+interface EnrichedSkill extends EveSkill { groupName?: string }
+
 interface SkillPanelProps {
   skills: EveSkill[]
   skillQueue: EveSkillQueueItem[]
   loading: boolean
   onRefresh: () => void
+  characterId?: number
 }
 
 const ROMAN = ['', 'I', 'II', 'III', 'IV', 'V']
@@ -377,7 +380,37 @@ function FitAnalyzer({ skills }: { skills: EveSkill[] }) {
   )
 }
 
-export default function SkillPanel({ skills, skillQueue, loading, onRefresh }: SkillPanelProps) {
+export default function SkillPanel({ skills, skillQueue, loading, onRefresh, characterId }: SkillPanelProps) {
+  const [enrichedSkills, setEnrichedSkills] = useState<EnrichedSkill[]>([])
+  const [openGroups, setOpenGroups] = useState<Set<string>>(new Set())
+
+  useEffect(() => {
+    if (!characterId) { setEnrichedSkills(skills); return }
+    fetch(`/api/skills/${characterId}`)
+      .then(r => r.ok ? r.json() : null)
+      .then(data => {
+        if (data?.skills?.length) setEnrichedSkills(data.skills)
+        else setEnrichedSkills(skills)
+      })
+      .catch(() => setEnrichedSkills(skills))
+  }, [characterId, skills])
+
+  const grouped = new Map<string, EnrichedSkill[]>()
+  for (const s of enrichedSkills) {
+    const g = s.groupName ?? 'Other'
+    if (!grouped.has(g)) grouped.set(g, [])
+    grouped.get(g)!.push(s)
+  }
+  const sortedGroups = [...grouped.keys()].sort()
+
+  function toggleGroup(g: string) {
+    setOpenGroups(prev => {
+      const next = new Set(prev)
+      next.has(g) ? next.delete(g) : next.add(g)
+      return next
+    })
+  }
+
   return (
     <div className="flex flex-col gap-3">
       {/* Header */}
@@ -418,18 +451,49 @@ export default function SkillPanel({ skills, skillQueue, loading, onRefresh }: S
           </div>
 
           <div className="eve-panel p-3">
-            <div className="eve-header">TRAINED SKILLS</div>
-            <div className="space-y-1">
-              {skills
-                .slice()
-                .sort((a, b) => b.skillpointsInSkill - a.skillpointsInSkill)
-                .slice(0, 50)
-                .map(skill => (
-                  <div key={skill.skillId} className="flex items-center justify-between py-0.5 border-b border-eve-border/30">
-                    <span className="text-eve-text text-xs truncate flex-1 mr-2">{skill.skillName}</span>
-                    <SkillDots level={skill.trainedLevel} />
+            <div className="flex items-center justify-between mb-2">
+              <div className="eve-header mb-0">TRAINED SKILLS</div>
+              <div className="flex gap-2">
+                {[5, 4, 3, 2, 1, 0].map(lvl => {
+                  const count = enrichedSkills.filter(s => s.trainedLevel === lvl).length
+                  if (!count) return null
+                  return (
+                    <span key={lvl} className="text-[10px] text-eve-muted">
+                      <span className="text-eve-cyan">{lvl === 0 ? '0' : ROMAN[lvl]}</span> {count}
+                    </span>
+                  )
+                })}
+              </div>
+            </div>
+            <div className="space-y-0.5">
+              {sortedGroups.map(group => {
+                const groupSkills = grouped.get(group)!.slice().sort((a, b) => a.skillName.localeCompare(b.skillName))
+                const isOpen = openGroups.has(group)
+                return (
+                  <div key={group}>
+                    <button
+                      onClick={() => toggleGroup(group)}
+                      className="w-full flex items-center justify-between py-1 text-left hover:bg-eve-border/20 px-1"
+                    >
+                      <span className="text-eve-cyan text-xs font-medium">{group}</span>
+                      <div className="flex items-center gap-2">
+                        <span className="text-eve-muted text-[10px]">{groupSkills.length}</span>
+                        <ChevronDown size={10} className={`text-eve-dim transition-transform ${isOpen ? 'rotate-180' : ''}`} />
+                      </div>
+                    </button>
+                    {isOpen && (
+                      <div className="ml-2 space-y-0.5 mb-1">
+                        {groupSkills.map(skill => (
+                          <div key={skill.skillId} className="flex items-center justify-between py-0.5 border-b border-eve-border/20">
+                            <span className="text-eve-text text-xs truncate flex-1 mr-2">{skill.skillName}</span>
+                            <SkillDots level={skill.trainedLevel} />
+                          </div>
+                        ))}
+                      </div>
+                    )}
                   </div>
-                ))}
+                )
+              })}
             </div>
           </div>
         </div>

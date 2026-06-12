@@ -5,6 +5,23 @@ export type VoicePhase = 'off' | 'standby' | 'activated' | 'listening' | 'pendin
 // Silence delay before auto-submit (ms)
 const SILENCE_DELAY = 2000
 
+const MIC_DEVICE_KEY = 'aurora_mic_device_id'
+
+// Prime Chromium's audio pipeline to the selected device.
+// SpeechRecognition follows the most recently activated getUserMedia stream.
+async function primeMic(): Promise<void> {
+  const deviceId = localStorage.getItem(MIC_DEVICE_KEY)
+  if (!deviceId || deviceId === 'default') return
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({
+      audio: { deviceId: { exact: deviceId } },
+    })
+    stream.getTracks().forEach(t => t.stop())
+  } catch {
+    // ignore — falls back to system default
+  }
+}
+
 function getSpeechRecognition(): (new () => SpeechRecognition) | null {
   if (typeof window === 'undefined') return null
   return (
@@ -120,6 +137,7 @@ export function useVoiceInput({
       })
     }
 
+    primeMic().then(() => {
     const rec = new SpeechRecognitionClass()
     rec.continuous = true
     rec.interimResults = true
@@ -160,6 +178,7 @@ export function useVoiceInput({
 
     activeRef.current = rec
     rec.start()
+    }) // primeMic
   }, [SpeechRecognitionClass, stopActive, armSilenceTimer])
 
   // ── Wake word listener ──────────────────────────────────────────────────
