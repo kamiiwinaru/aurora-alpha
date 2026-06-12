@@ -143,7 +143,7 @@ async function executeIndustryQuery(query: string, characterId?: number): Promis
 }
 
 // ── Server-side skills cache ──────────────────────────────────────────────
-interface SkillEntry { skillId: number; skillName: string; trainedLevel: number; skillpointsInSkill: number }
+interface SkillEntry { skillId: number; skillName: string; trainedLevel: number; skillpointsInSkill: number; groupName?: string }
 interface SkillQueueEntry { skillName: string; finishedLevel: number; finishDate?: string }
 interface AttributesEntry { intelligence: number; memory: number; perception: number; willpower: number; charisma: number }
 interface SkillsCacheEntry {
@@ -154,6 +154,63 @@ interface SkillsCacheEntry {
   characterName: string
 }
 const skillsCache = new Map<number, SkillsCacheEntry>()
+const SKILLS_SYNC_TTL = 72 * 60 * 60 * 1000
+
+async function resolveSkillGroups(skills: SkillEntry[]): Promise<SkillEntry[]> {
+  const typeIds = [...new Set(skills.map(s => s.skillId))]
+  const groupIdMap: Record<number, number> = {}
+
+  // Fetch type info in chunks of 20 to be ESI-friendly
+  const chunks: number[][] = []
+  for (let i = 0; i < typeIds.length; i += 20) chunks.push(typeIds.slice(i, i + 20))
+  await Promise.all(chunks.map(chunk =>
+    Promise.all(chunk.map(async typeId => {
+      try {
+        const r = await fetch(`https://esi.evetech.net/latest/universe/types/${typeId}/`)
+        const d = await r.json() as { group_id?: number }
+        if (d.group_id) groupIdMap[typeId] = d.group_id
+      } catch { /* non-fatal */ }
+    }))
+  ))
+
+  const uniqueGroupIds = [...new Set(Object.values(groupIdMap))]
+  const groupNameMap: Record<number, string> = {}
+  await Promise.all(uniqueGroupIds.map(async groupId => {
+    try {
+      const r = await fetch(`https://esi.evetech.net/latest/universe/groups/${groupId}/`)
+      const d = await r.json() as { name?: string }
+      if (d.name) groupNameMap[groupId] = d.name
+    } catch { /* non-fatal */ }
+  }))
+
+  return skills.map(s => ({
+    ...s,
+    groupName: groupIdMap[s.skillId] ? (groupNameMap[groupIdMap[s.skillId]] ?? 'Other') : 'Other',
+  }))
+}
+
+function skillsFilePath(characterId: number) {
+  return join(process.cwd(), `skills_${characterId}.json`)
+}
+
+function loadSkillsFromDisk(characterId: number): SkillsCacheEntry | null {
+  try {
+    const p = skillsFilePath(characterId)
+    if (!existsSync(p)) return null
+    return JSON.parse(readFileSync(p, 'utf8')) as SkillsCacheEntry
+  } catch { return null }
+}
+
+// Pre-load any persisted skills files into memory on startup
+try {
+  readdirSync(process.cwd())
+    .filter(f => /^skills_\d+\.json$/.test(f))
+    .forEach(f => {
+      const id = Number(f.replace('skills_', '').replace('.json', ''))
+      const entry = loadSkillsFromDisk(id)
+      if (entry) { skillsCache.set(id, entry); console.log(`Skills loaded from disk: ${entry.characterName} (${id})`) }
+    })
+} catch { /* non-fatal */ }
 
 async function executeSkillQuery(query: string, characterId?: number): Promise<string> {
   const entry = characterId ? skillsCache.get(characterId) : null
@@ -163,11 +220,20 @@ async function executeSkillQuery(query: string, characterId?: number): Promise<s
   const totalSP = entry.skills.reduce((s, sk) => s + sk.skillpointsInSkill, 0)
   const atV = entry.skills.filter(s => s.trainedLevel === 5).length
 
-  const top50 = [...entry.skills]
-    .sort((a, b) => b.skillpointsInSkill - a.skillpointsInSkill)
-    .slice(0, 50)
-    .map(s => `  ${s.skillName} ${s.trainedLevel} (${Math.round(s.skillpointsInSkill / 1000)}k SP)`)
-    .join('\n')
+  // Group all skills by groupName, sorted alphabetically within each group
+  const grouped = new Map<string, SkillEntry[]>()
+  for (const s of entry.skills) {
+    const g = s.groupName ?? 'Other'
+    if (!grouped.has(g)) grouped.set(g, [])
+    grouped.get(g)!.push(s)
+  }
+  const skillsBlock = [...grouped.keys()].sort().map(group => {
+    const lines = grouped.get(group)!
+      .sort((a, b) => a.skillName.localeCompare(b.skillName))
+      .map(s => `    ${s.skillName} ${s.trainedLevel} (${Math.round(s.skillpointsInSkill / 1000)}k SP)`)
+      .join('\n')
+    return `  [${group}]\n${lines}`
+  }).join('\n')
 
   const queueLines = entry.queue.slice(0, 15).map(q => {
     if (!q.finishDate) return `  ${q.skillName} → ${q.finishedLevel}`
@@ -186,7 +252,7 @@ async function executeSkillQuery(query: string, characterId?: number): Promise<s
     `Total SP: ${totalSP.toLocaleString()} | Skills at V: ${atV} | Known: ${entry.skills.length}`,
     `Attributes: ${attrLine}`,
     `\nSKILL QUEUE:\n${queueLines}`,
-    `\nTOP 50 SKILLS BY SP:\n${top50}`,
+    `\nALL SKILLS BY GROUP:\n${skillsBlock}`,
   ].join('\n')
 
   try {
@@ -1850,9 +1916,34 @@ app.post('/api/skills/sync', (req, res) => {
     skills: SkillEntry[]; queue: SkillQueueEntry[]; attributes: AttributesEntry | null
   }
   if (!characterId || !Array.isArray(skills)) return res.status(400).json({ error: 'characterId and skills required' })
-  skillsCache.set(characterId, { skills, queue: queue ?? [], attributes: attributes ?? null, syncedAt: Date.now(), characterName })
-  console.log(`Skills cache updated: ${characterName} (${characterId}) — ${skills.length} skills`)
+
+  const existing = loadSkillsFromDisk(characterId)
+  if (existing && Date.now() - existing.syncedAt < SKILLS_SYNC_TTL) {
+    skillsCache.set(characterId, existing)
+    return res.json({ ok: true, skipped: true, nextSyncAt: new Date(existing.syncedAt + SKILLS_SYNC_TTL).toISOString() })
+  }
+
+  const entry: SkillsCacheEntry = { skills, queue: queue ?? [], attributes: attributes ?? null, syncedAt: Date.now(), characterName }
+  skillsCache.set(characterId, entry)
+  writeFileSync(skillsFilePath(characterId), JSON.stringify(entry, null, 2), 'utf8')
+  console.log(`Skills cache updated: ${characterName} (${characterId}) — ${skills.length} skills, resolving groups...`)
+
+  // Resolve group names async — rewrites file and cache when done
+  resolveSkillGroups(skills).then(enriched => {
+    const enrichedEntry = { ...entry, skills: enriched }
+    skillsCache.set(characterId, enrichedEntry)
+    writeFileSync(skillsFilePath(characterId), JSON.stringify(enrichedEntry, null, 2), 'utf8')
+    console.log(`Skills groups resolved: ${characterName} (${characterId})`)
+  }).catch(err => console.warn('Skills group resolution failed:', err))
+
   return res.json({ ok: true, skills: skills.length, queue: queue?.length ?? 0 })
+})
+
+app.get('/api/skills/:characterId', (req, res) => {
+  const id = Number(req.params.characterId)
+  const entry = skillsCache.get(id) ?? loadSkillsFromDisk(id)
+  if (!entry) return res.status(404).json({ error: 'No skills data for this character' })
+  return res.json(entry)
 })
 
 

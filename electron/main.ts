@@ -165,7 +165,8 @@ function createWindow() {
   ;(global as any).__auroraLog = (msg: string) => log(`[server] ${msg}`)
 
   ;(global as any).__auroraOAuthCallback = (params: string) => {
-    log(`OAuth callback received: ${params.slice(0, 80)}...`)
+    const redacted = params.replace(/(eve_access_token|eve_refresh_token|code)=[^&]*/g, '$1=[redacted]')
+    log(`OAuth callback received: ${redacted}`)
     const base = isDev ? 'http://localhost:5173' : 'http://localhost:3001'
     mainWindow?.loadURL(`${base}/?${params}`)
   }
@@ -190,15 +191,14 @@ function createWindow() {
     mainWindow.setFullScreen(!mainWindow.isFullScreen())
   })
 
-  // F12 opens DevTools in all builds for debugging
-  globalShortcut.register('F12', () => {
-    mainWindow?.webContents.openDevTools({ mode: 'detach' })
-  })
-
-  // Also open DevTools automatically on any failed load
-  mainWindow.webContents.on('did-fail-load', () => {
-    mainWindow?.webContents.openDevTools({ mode: 'detach' })
-  })
+  if (isDev) {
+    globalShortcut.register('F12', () => {
+      mainWindow?.webContents.openDevTools({ mode: 'detach' })
+    })
+    mainWindow.webContents.on('did-fail-load', () => {
+      mainWindow?.webContents.openDevTools({ mode: 'detach' })
+    })
+  }
 
   // Log all navigation events to help debug OAuth flow
   mainWindow.webContents.on('will-navigate', (_e, url) => {
@@ -282,9 +282,22 @@ ipcMain.handle('window:isMaximized', () => mainWindow?.isMaximized() ?? false)
 // ── Setup / env IPC ───────────────────────────────────────────────────────
 ipcMain.handle('setup:getMissing', () => getMissingKeys())
 ipcMain.on('setup:getMissingSync', (e) => { e.returnValue = getMissingKeys() })
-ipcMain.handle('setup:getValues', () => readEnvValues())
+ipcMain.handle('setup:getValues', () => {
+  const vals = readEnvValues()
+  return {
+    ANTHROPIC_API_KEY:    vals['ANTHROPIC_API_KEY']    ? '••••configured••••' : '',
+    ELEVENLABS_API_KEY:   vals['ELEVENLABS_API_KEY']   ? '••••configured••••' : '',
+    ELEVENLABS_VOICE_ID:  vals['ELEVENLABS_VOICE_ID']  || '',
+  }
+})
 ipcMain.handle('setup:save', (_e, values: Record<string, string>) => {
-  writeEnvValues(values)
+  const existing = readEnvValues()
+  const merged = { ...existing, ...values }
+  // If user left a field blank, keep the existing value
+  for (const k of Object.keys(existing)) {
+    if (!values[k]) merged[k] = existing[k]
+  }
+  writeEnvValues(merged)
   loadEnv()
   const remaining = getMissingKeys()
   if (remaining.length === 0) {

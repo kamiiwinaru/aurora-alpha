@@ -34,6 +34,7 @@ let loadPromise: Promise<void> | null = null
 // At default zoom 10.5 and span ≈ 525 px: 0.015 * 525 * 10.5 ≈ 83 px between
 // system centers. Pills are ~70 px wide — comfortable gap, no visible grid.
 const MIN_D = 0.015
+const REGION_ZOOM = 3.5
 
 function applyMinSeparation(passes = 4) {
   const CELL = MIN_D * 1.5
@@ -243,7 +244,77 @@ function secColorHex(sec: number): string {
 }
 function secLabel(sec: number): string { return sec.toFixed(1) }
 
-// ── Autocomplete input ────────────────────────────────────────────────────────
+// ── Unified map search (systems + regions) ───────────────────────────────────
+type SearchTarget = { type: 'system'; sys: System } | { type: 'region'; reg: Region }
+
+function MapSearchInput({
+  value, onChange, onSelect, placeholder, inputClass = '', wrapperClass = '', rightSlot, onEnter,
+}: {
+  value: string; onChange: (v: string) => void; onSelect: (t: SearchTarget) => void
+  placeholder?: string; inputClass?: string; wrapperClass?: string
+  rightSlot?: React.ReactNode; onEnter?: () => void
+}) {
+  const [open, setOpen] = useState(false)
+  const [activeIdx, setActiveIdx] = useState(0)
+
+  type Suggestion = { kind: 'system'; sys: System } | { kind: 'region'; reg: Region }
+  const suggestions = useMemo<Suggestion[]>(() => {
+    if (value.length < 2) return []
+    const q = value.toLowerCase()
+    const regStarts   = REGIONS.filter(r => r.name.toLowerCase().startsWith(q))
+    const regContains = REGIONS.filter(r => !r.name.toLowerCase().startsWith(q) && r.name.toLowerCase().includes(q))
+    const sysStarts   = SYSTEMS.filter(s => s.name.toLowerCase().startsWith(q))
+    const sysContains = SYSTEMS.filter(s => !s.name.toLowerCase().startsWith(q) && s.name.toLowerCase().includes(q))
+    const regions  = [...regStarts, ...regContains].slice(0, 3).map(r => ({ kind: 'region' as const, reg: r }))
+    const systems  = [...sysStarts, ...sysContains].slice(0, 6).map(s => ({ kind: 'system' as const, sys: s }))
+    return [...regions, ...systems].slice(0, 9)
+  }, [value])
+
+  const choose = (sg: Suggestion) => {
+    if (sg.kind === 'region') { onChange(sg.reg.name); onSelect({ type: 'region', reg: sg.reg }) }
+    else                      { onChange(sg.sys.name); onSelect({ type: 'system', sys: sg.sys }) }
+    setOpen(false)
+  }
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === 'Escape') { setOpen(false); return }
+    if (!open || suggestions.length === 0) { if (e.key === 'Enter') onEnter?.(); return }
+    if (e.key === 'ArrowDown') { e.preventDefault(); setActiveIdx(i => Math.min(i+1, suggestions.length-1)) }
+    else if (e.key === 'ArrowUp') { e.preventDefault(); setActiveIdx(i => Math.max(i-1, 0)) }
+    else if (e.key === 'Enter' || e.key === 'Tab') { e.preventDefault(); choose(suggestions[activeIdx]) }
+  }
+  return (
+    <div className={`relative ${wrapperClass}`}>
+      <input type="text" value={value} placeholder={placeholder} className={inputClass}
+        onChange={e => { onChange(e.target.value); setOpen(true); setActiveIdx(0) }}
+        onFocus={() => setOpen(true)} onBlur={() => setTimeout(() => setOpen(false), 120)}
+        onKeyDown={handleKeyDown} />
+      {rightSlot}
+      {open && suggestions.length > 0 && (
+        <div className="absolute z-50 top-full left-0 right-0 bg-eve-panel border border-eve-border shadow-lg overflow-hidden" style={{ maxHeight: 220 }}>
+          <div className="overflow-y-auto" style={{ maxHeight: 220 }}>
+            {suggestions.map((sg, i) => sg.kind === 'region' ? (
+              <div key={`r-${sg.reg.name}`} onMouseDown={() => choose(sg)}
+                className={`flex items-center gap-2 px-2 py-1 cursor-pointer text-[9px] font-mono ${i === activeIdx ? 'bg-eve-gold/15 text-eve-text' : 'text-eve-muted hover:bg-eve-border/20 hover:text-eve-text'}`}>
+                <span className="text-eve-gold text-[8px] shrink-0 w-10">REGION</span>
+                <span className="text-eve-text">{sg.reg.name}</span>
+                <span className="ml-auto text-eve-dim text-[8px] shrink-0">{sg.reg.systems.length} sys</span>
+              </div>
+            ) : (
+              <div key={`s-${sg.sys.id}`} onMouseDown={() => choose(sg)}
+                className={`flex items-center gap-2 px-2 py-1 cursor-pointer text-[9px] font-mono ${i === activeIdx ? 'bg-eve-cyan/15 text-eve-text' : 'text-eve-muted hover:bg-eve-border/20 hover:text-eve-text'}`}>
+                <span className="w-1.5 h-1.5 rounded-full shrink-0" style={{ background: secColor(sg.sys.sec) }} />
+                <span>{sg.sys.name}</span>
+                <span className="ml-auto text-eve-dim text-[8px] shrink-0">{sg.sys.region}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+// Keep SystemInput for route origin/destination (systems only)
 function SystemInput({
   value, onChange, onSelect, placeholder, inputClass = '', wrapperClass = '', rightSlot, onEnter,
 }: {
@@ -307,8 +378,8 @@ export default function MapPanel({ currentSystemName, jumpBridges = [] }: MapPan
   const [selected, setSelected] = useState<System | null>(null)
   const [hovered, setHovered]   = useState<System | null>(null)
   const [colorBySec, setColorBySec] = useState(true)
-  const [search, setSearch]         = useState('')
-  const [searchResult, setSearchResult] = useState<System | null>(null)
+  const [search, setSearch]           = useState('')
+  const [searchTarget, setSearchTarget] = useState<SearchTarget | null>(null)
 
   // Route state
   const [routeFrom, setRouteFrom]   = useState('')
@@ -357,8 +428,8 @@ export default function MapPanel({ currentSystemName, jumpBridges = [] }: MapPan
   manualExpandedRef.current = manualExpanded
 
   // Ref mirrors for stale-closure-safe draw access
-  const searchResultRef = useRef<System | null>(null)
-  searchResultRef.current = searchResult
+  const searchTargetRef = useRef<SearchTarget | null>(null)
+  searchTargetRef.current = searchTarget
   const routeRef   = useRef<number[]>([])
   routeRef.current = route
   // bridgesRef stores ONE entry per bridge (unique pairs).
@@ -392,11 +463,12 @@ export default function MapPanel({ currentSystemName, jumpBridges = [] }: MapPan
   const autoExpanded = useMemo(() => {
     const set = new Set<string>()
     if (currentSys_forReg) set.add(currentSys_forReg.region)
-    if (searchResult) set.add(searchResult.region)
+    if (searchTarget?.type === 'system')  set.add(searchTarget.sys.region)
+    if (searchTarget?.type === 'region')  set.add(searchTarget.reg.name)
     for (const id of route) { const s = sysMap.get(id); if (s) set.add(s.region) }
     for (const name of manualExpanded) set.add(name)
     return set
-  }, [currentSys_forReg?.region, searchResult?.region, route, manualExpanded]) // eslint-disable-line
+  }, [currentSys_forReg?.region, searchTarget, route, manualExpanded]) // eslint-disable-line
   const autoExpandedRef = useRef<Set<string>>(new Set())
   autoExpandedRef.current = autoExpanded
 
@@ -453,7 +525,6 @@ export default function MapPanel({ currentSystemName, jumpBridges = [] }: MapPan
     }
 
     // Region zoom threshold: below this → region nodes; above → systems
-    const REGION_ZOOM = 3.5
     const inRegionMode = zoom < REGION_ZOOM
     const isExpanded   = (name: string) =>
       autoExpandedRef.current.has(name) || hoveredRegRef.current === name
@@ -585,7 +656,10 @@ export default function MapPanel({ currentSystemName, jumpBridges = [] }: MapPan
       const isCurrent      = s.id === currentSysId
       const isSelectedSys  = selected?.id === s.id
       const isHoveredSys   = hovered?.id === s.id
-      const isSearchResult = searchResultRef.current?.id === s.id
+      const st = searchTargetRef.current
+      const isSearchResult = st?.type === 'system' ? st.sys.id === s.id
+                           : st?.type === 'region'  ? st.reg.name === s.region
+                           : false
 
       ctx.font = `${fontSize}px 'Courier New', monospace`
       ctx.textAlign = 'center'
@@ -633,8 +707,10 @@ export default function MapPanel({ currentSystemName, jumpBridges = [] }: MapPan
 
         const isHR         = hoveredRegRef.current === r.name
         const hasCurrentSys = r.systems.some(s => s.id === currentSysId)
-        const hasSearchRes  = searchResultRef.current !== null &&
-          r.systems.some(s => s.id === searchResultRef.current!.id)
+        const _st = searchTargetRef.current
+        const hasSearchRes  = _st?.type === 'region'  ? _st.reg.name === r.name
+                            : _st?.type === 'system'  ? r.systems.some(s => s.id === _st.sys.id)
+                            : false
 
         let color = colorBySec ? secColor(r.sec) : 'rgb(58,80,104)'
         if (hasCurrentSys) color = 'rgb(0,212,255)'
@@ -869,7 +945,7 @@ export default function MapPanel({ currentSystemName, jumpBridges = [] }: MapPan
 
   useEffect(() => {
     schedDraw()
-  }, [selected, hovered, colorBySec, loaded, jumpBridges, searchResult, route, manualExpanded, schedDraw])
+  }, [selected, hovered, colorBySec, loaded, jumpBridges, searchTarget, route, manualExpanded, schedDraw])
 
   // ── Navigation helpers ──────────────────────────────────────────────────
   const jumpToSystem = useCallback((sys: System, targetZoom?: number) => {
@@ -880,6 +956,28 @@ export default function MapPanel({ currentSystemName, jumpBridges = [] }: MapPan
     stateRef.current.offsetX = -(sys.x * span * z)
     stateRef.current.offsetY =  (sys.z * span * z)
     setSelected(sys)
+    schedDraw()
+  }, [schedDraw])
+
+  const jumpToRegion = useCallback((reg: Region) => {
+    const systems = reg.systems
+    if (systems.length === 0) return
+    const { W, H } = stateRef.current
+    const span = Math.min(W, H) * 0.75
+    const xs = systems.map(s => s.x), zs = systems.map(s => s.z)
+    const minX = Math.min(...xs), maxX = Math.max(...xs)
+    const minZ = Math.min(...zs), maxZ = Math.max(...zs)
+    const rangeX = maxX - minX || MIN_D * 8
+    const rangeZ = maxZ - minZ || MIN_D * 8
+    const PAD = 1.5
+    const zoomX = (W / span) / (rangeX * PAD)
+    const zoomZ = (H / span) / (rangeZ * PAD)
+    // Clamp: must be above REGION_ZOOM so systems are visible, not above 12
+    const newZoom = Math.max(REGION_ZOOM + 0.5, Math.min(12, Math.min(zoomX, zoomZ)))
+    const cx = (minX + maxX) / 2, cz = (minZ + maxZ) / 2
+    stateRef.current.zoom    = newZoom
+    stateRef.current.offsetX = -(cx * span * newZoom)
+    stateRef.current.offsetY =  (cz * span * newZoom)
     schedDraw()
   }, [schedDraw])
 
@@ -935,11 +1033,21 @@ export default function MapPanel({ currentSystemName, jumpBridges = [] }: MapPan
     schedDraw()
   }
 
+  const handleSearchSelect = (target: SearchTarget) => {
+    if (target.type === 'region') {
+      setSearch(target.reg.name)
+      setSearchTarget(target)
+      jumpToRegion(target.reg)
+    } else {
+      setSearch(target.sys.name)
+      setSearchTarget(target)
+      jumpToSystem(target.sys, 10.5)
+    }
+  }
+
   const handleSearch = (q: string) => {
     setSearch(q)
-    if (!q.trim()) { setSearchResult(null); return }
-    const match = SYSTEMS.find(s => s.name.toLowerCase().includes(q.toLowerCase()))
-    if (match) { setSearchResult(match); jumpToSystem(match, 10.5) }
+    if (!q.trim()) { setSearchTarget(null); return }
   }
 
   const addAvoidSystem = (input: string) => {
@@ -1101,8 +1209,8 @@ export default function MapPanel({ currentSystemName, jumpBridges = [] }: MapPan
 
           {/* Search */}
           <div className="p-2 border-b border-eve-border shrink-0">
-            <SystemInput value={search} onChange={handleSearch} onSelect={s => handleSearch(s.name)}
-              placeholder="Search system..." wrapperClass="w-full"
+            <MapSearchInput value={search} onChange={handleSearch} onSelect={handleSearchSelect}
+              placeholder="Search system or region..." wrapperClass="w-full"
               inputClass="w-full bg-eve-black border border-eve-border text-eve-text text-[10px] px-2 py-1.5 outline-none focus:border-eve-cyan placeholder:text-eve-dim font-mono" />
           </div>
 

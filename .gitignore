@@ -9,6 +9,7 @@ release/
 fits.json
 todos.json
 structures.json
+skills_*.json
 .claude/
 scripts/.rebuild-log.txt
 bot/

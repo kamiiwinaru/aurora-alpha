@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import OptionsMenu from './OptionsMenu'
 
 export default function TitleBar() {
   const [isMaximized, setIsMaximized] = useState(false)
@@ -29,11 +30,15 @@ export default function TitleBar() {
         </span>
       </div>
 
-      {/* Right — window controls */}
+      {/* Right — settings + window controls */}
       <div
         className="flex items-center gap-1"
         style={{ WebkitAppRegion: 'no-drag' as any }}
       >
+        <OptionsMenu />
+
+        <div className="w-px h-4 mx-0.5" style={{ background: 'rgba(0,212,255,0.12)' }} />
+
         {/* Minimize */}
         <button
           onClick={window.electronAPI.minimize}
