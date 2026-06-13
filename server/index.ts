@@ -523,6 +523,63 @@ app.delete('/api/structures/:id', (req, res) => {
   return res.json({ ok: true })
 })
 
+// ── Feedback ──────────────────────────────────────────────────────────────────
+interface FeedbackItem { id: string; type: string; description: string; steps?: string | null; panel: string; version?: string; createdAt: string }
+const FEEDBACK_FILE = join(process.cwd(), 'feedback.json')
+function loadFeedback(): FeedbackItem[] {
+  try { return existsSync(FEEDBACK_FILE) ? JSON.parse(readFileSync(FEEDBACK_FILE, 'utf8')) : [] } catch { return [] }
+}
+const TYPE_COLOR: Record<string, number> = {
+  'Bug': 0xE74C3C,
+  'UI Issue': 0xE67E22,
+  'Feature Request': 0x2ECC71,
+  'Other': 0x95A5A6,
+}
+
+async function postToDiscord(item: FeedbackItem, screenshotBase64?: string | null) {
+  const webhookUrl = process.env.DISCORD_WEBHOOK_URL
+  if (!webhookUrl) return
+  const fields = []
+  if (item.steps) fields.push({ name: 'Steps to Reproduce', value: item.steps, inline: false })
+  const embed = {
+    title: `${item.type} — ${item.panel.toUpperCase()}`,
+    description: item.description,
+    color: TYPE_COLOR[item.type] ?? 0x95A5A6,
+    fields,
+    footer: { text: `Aurora Alpha v${item.version ?? '?'} · ${new Date(item.createdAt).toUTCString()}` },
+    ...(screenshotBase64 ? { image: { url: 'attachment://screenshot.png' } } : {}),
+  }
+  try {
+    if (screenshotBase64) {
+      const buf = Buffer.from(screenshotBase64, 'base64')
+      const form = new FormData()
+      form.append('payload_json', JSON.stringify({ embeds: [embed] }))
+      form.append('files[0]', new Blob([buf], { type: 'image/png' }), 'screenshot.png')
+      await fetch(webhookUrl, { method: 'POST', body: form })
+    } else {
+      await fetch(webhookUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ embeds: [embed] }),
+      })
+    }
+  } catch (e) {
+    console.error('[feedback] discord webhook failed:', e)
+  }
+}
+
+app.post('/api/feedback', async (req, res) => {
+  const { type, description, steps, panel, version, screenshot } = req.body as { type: string; description: string; steps?: string; panel: string; version?: string; screenshot?: string | null }
+  if (!description?.trim()) return res.status(400).json({ error: 'description required' })
+  const items = loadFeedback()
+  const item: FeedbackItem = { id: Date.now().toString(), type: type || 'Bug', description: description.trim(), steps: steps || null, panel: panel || 'unknown', version, createdAt: new Date().toISOString() }
+  items.push(item)
+  writeFileSync(FEEDBACK_FILE, JSON.stringify(items, null, 2), 'utf8')
+  res.json(item)
+  postToDiscord(item, screenshot) // fire and forget — don't block the response
+})
+
+// ── Todos ─────────────────────────────────────────────────────────────────────
 interface TodoItem { id: string; text: string; done: boolean; createdAt: string }
 
 const TODO_FILE = join(process.cwd(), 'todos.json')
@@ -2568,6 +2625,177 @@ app.post('/api/eve/structure-names', async (req, res) => {
   res.json(results)
 })
 
+// ── Trade Agent scan ─────────────────────────────────────────────────────
+// POST /api/trade/scan
+// body: { regionId, stationId, hubName, minSpread?, limit?, minDailyVol? }
+// Returns all three mode result sets in one shot — client switches modes without re-fetching.
+app.post('/api/trade/scan', async (req, res) => {
+  const { regionId, stationId, hubName, minSpread = 10, limit = 25, minDailyVol = 5 } = req.body as {
+    regionId: number; stationId: number; hubName: string
+    minSpread?: number; limit?: number; minDailyVol?: number
+  }
+  if (!regionId || !stationId) return res.status(400).json({ error: 'regionId and stationId required' })
+
+  const BROKER = 0.03
+  const SALES_TAX = 0.036
+
+  try {
+    // Fetch all orders for this station (paginated)
+    const baseUrl = `https://esi.evetech.net/latest/markets/${regionId}/orders/?datasource=tranquility&location_id=${stationId}&order_type=all`
+    const firstRes = await fetch(`${baseUrl}&page=1`, { headers: { Accept: 'application/json' } })
+    if (!firstRes.ok && firstRes.status !== 404 && firstRes.status !== 204) throw new Error(`ESI ${firstRes.status}`)
+    const firstText = await firstRes.text()
+    const allOrders: any[] = []
+    if (firstText && firstText !== 'null') {
+      try { const b = JSON.parse(firstText); if (Array.isArray(b)) allOrders.push(...b) } catch { /* ignore */ }
+    }
+    const totalPages = parseInt(firstRes.headers.get('X-Pages') ?? '1', 10)
+    if (totalPages > 1) {
+      const remaining = Array.from({ length: totalPages - 1 }, (_, i) => i + 2)
+      for (let i = 0; i < remaining.length; i += 5) {
+        const batch = remaining.slice(i, i + 5)
+        const results = await Promise.all(batch.map(async p => {
+          const r = await fetch(`${baseUrl}&page=${p}`, { headers: { Accept: 'application/json' } })
+          if (!r.ok) return []
+          const t = await r.text()
+          if (!t || t === 'null') return []
+          try { return JSON.parse(t) } catch { return [] }
+        }))
+        for (const chunk of results) if (Array.isArray(chunk)) allOrders.push(...chunk)
+        if (i + 5 < remaining.length) await new Promise(r => setTimeout(r, 200))
+      }
+    }
+
+    // Sell orders: exact station only. Buy orders: region-wide (range-based fills).
+    const sellOrders = allOrders.filter((o: any) => !o.is_buy_order && o.location_id === stationId)
+    const buyOrders  = allOrders.filter((o: any) =>  o.is_buy_order)
+
+    // Group by type_id
+    const byType = new Map<number, { sells: any[]; buys: any[] }>()
+    for (const o of sellOrders) {
+      if (!byType.has(o.type_id)) byType.set(o.type_id, { sells: [], buys: [] })
+      byType.get(o.type_id)!.sells.push(o)
+    }
+    for (const o of buyOrders) {
+      if (!byType.has(o.type_id)) byType.set(o.type_id, { sells: [], buys: [] })
+      byType.get(o.type_id)!.buys.push(o)
+    }
+
+    // Compute all deals (no mode filter yet — build the full universe)
+    type Deal = { typeId: number; bestSell: number; bestBuy: number; spread: number; sellVol: number; buyVol: number }
+    const allDeals: Deal[] = []
+    for (const [typeId, { sells, buys }] of byType) {
+      if (!sells.length || !buys.length) continue
+      const bestSell = Math.min(...sells.map((o: any) => o.price))
+      const accessibleBuys = buys.filter((o: any) => (o.min_volume ?? 1) <= 1)
+      if (!accessibleBuys.length) continue
+      const bestBuy = Math.max(...accessibleBuys.map((o: any) => o.price))
+      if (bestSell <= 0 || bestBuy < 100_000) continue
+      const spread = ((bestSell - bestBuy) / bestBuy) * 100
+      const sellVol = sells.reduce((s: number, o: any) => s + o.volume_remain, 0)
+      const buyVol  = buys.reduce((s: number, o: any) => s + o.volume_remain, 0)
+      allDeals.push({ typeId, bestSell, bestBuy, spread, sellVol, buyVol })
+    }
+
+    // ── MISLISTED: negative spread, deepest first ──────────────────────────
+    const mislistedDeals = allDeals
+      .filter(d => d.spread < 0)
+      .sort((a, b) => a.spread - b.spread)
+      .slice(0, limit)
+
+    // ── HIGH VOL: positive spread ≥ minSpread, sorted by sell volume ───────
+    const highvolDeals = allDeals
+      .filter(d => d.spread >= minSpread && d.spread <= 200 && d.bestBuy >= d.bestSell * 0.15)
+      .sort((a, b) => b.sellVol - a.sellVol)
+      .slice(0, limit)
+
+    // ── RELIST: spread ≥ minSpread, enriched with 30d history ─────────────
+    const relistPool = allDeals
+      .filter(d => d.spread >= minSpread && d.spread <= 100 && d.bestBuy >= d.bestSell * 0.50)
+      .sort((a, b) => b.spread - a.spread)
+      .slice(0, 200)
+
+    const dailyVolMap: Record<number, number> = {}
+    const HIST_BATCH = 20
+    for (let i = 0; i < relistPool.length; i += HIST_BATCH) {
+      const batch = relistPool.slice(i, i + HIST_BATCH)
+      await Promise.all(batch.map(async d => {
+        try {
+          const hr = await fetch(
+            `https://esi.evetech.net/latest/markets/${regionId}/history/?datasource=tranquility&type_id=${d.typeId}`,
+            { headers: { Accept: 'application/json' } }
+          )
+          if (hr.ok) {
+            const hist = await hr.json() as { date: string; volume: number }[]
+            if (Array.isArray(hist) && hist.length > 0) {
+              const recent = hist.slice(-30)
+              dailyVolMap[d.typeId] = Math.round(recent.reduce((s, h) => s + h.volume, 0) / recent.length)
+            }
+          }
+        } catch { /* skip */ }
+      }))
+      if (i + HIST_BATCH < relistPool.length) await new Promise(r => setTimeout(r, 150))
+    }
+
+    const relistDeals = relistPool
+      .filter(d => (dailyVolMap[d.typeId] ?? 0) >= minDailyVol)
+      .sort((a, b) => {
+        const pa = (a.bestSell - a.bestBuy - a.bestSell * (BROKER + SALES_TAX)) * (dailyVolMap[a.typeId] ?? 0)
+        const pb = (b.bestSell - b.bestBuy - b.bestSell * (BROKER + SALES_TAX)) * (dailyVolMap[b.typeId] ?? 0)
+        return pb - pa
+      })
+      .slice(0, limit)
+
+    // Resolve names for union of all result typeIds
+    const allTypeIds = [...new Set([
+      ...relistDeals.map(d => d.typeId),
+      ...mislistedDeals.map(d => d.typeId),
+      ...highvolDeals.map(d => d.typeId),
+    ])]
+    const nameMap: Record<number, string> = {}
+    if (allTypeIds.length) {
+      const chunks: number[][] = []
+      for (let i = 0; i < allTypeIds.length; i += 1000) chunks.push(allTypeIds.slice(i, i + 1000))
+      await Promise.all(chunks.map(async chunk => {
+        const nr = await fetch('https://esi.evetech.net/latest/universe/names/', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(chunk),
+        })
+        if (nr.ok) {
+          const names = await nr.json() as { id: number; name: string }[]
+          for (const n of names) nameMap[n.id] = n.name
+        }
+      }))
+    }
+
+    const formatDeal = (d: Deal, isMislisted = false) => ({
+      typeId: d.typeId,
+      name: nameMap[d.typeId] ?? `Type ${d.typeId}`,
+      bestBuy: d.bestBuy,
+      bestSell: d.bestSell,
+      spread: parseFloat(d.spread.toFixed(1)),
+      netSpread: parseFloat((d.spread - (BROKER + SALES_TAX) * 100).toFixed(1)),
+      profitPerUnit: isMislisted
+        ? parseFloat((d.bestBuy - d.bestSell - d.bestBuy * SALES_TAX - d.bestBuy * BROKER).toFixed(0))
+        : parseFloat((d.bestSell - d.bestBuy - d.bestSell * SALES_TAX - d.bestSell * BROKER).toFixed(0)),
+      dailyVol: dailyVolMap[d.typeId] ?? null,
+      sellVol: d.sellVol,
+      buyVol: d.buyVol,
+    })
+
+    res.json({
+      hub: hubName,
+      total: allOrders.length,
+      relist:    relistDeals.map(d => formatDeal(d, false)),
+      mislisted: mislistedDeals.map(d => formatDeal(d, true)),
+      highvol:   highvolDeals.map(d => formatDeal(d, false)),
+    })
+  } catch (err) {
+    res.status(500).json({ error: err instanceof Error ? err.message : 'Scan failed' })
+  }
+})
+
 // ── zKillboard proxy ──────────────────────────────────────────────────────
 // zKill returns only {killmail_id, zkb:{hash,...}}. We then fetch the full
 // killmail from ESI using the hash to get victim/attacker details.
@@ -3165,7 +3393,7 @@ async function collectRequiredSkills(
     try { info = await getFitTypeInfo(typeId) } catch { return }
 
     if (asSkillLevel !== undefined) {
-      result.set(typeId, { skillName: info.name, level: asSkillLevel, rank: info.rank })
+      result.set(typeId, { skillName: info.name.replace(/\s+/g, ' ').trim(), level: asSkillLevel, rank: info.rank })
     }
 
     for (const req of info.requiredSkills) {
@@ -3202,11 +3430,18 @@ interface CharSkillInput {
 }
 
 app.post('/api/skills/analyze-fit', async (req, res) => {
-  const { fitText, skills: charSkills = [] } = req.body as {
+  const { fitText, characterId, skills: bodySkills = [] } = req.body as {
     fitText: string
+    characterId?: number
     skills: CharSkillInput[]
   }
   if (!fitText?.trim()) return res.status(400).json({ error: 'fitText required' })
+
+  // Prefer server-cached skills (authoritative, per-character) over body if characterId provided
+  const cached = characterId ? (skillsCache.get(characterId) ?? loadSkillsFromDisk(characterId)) : null
+  const charSkills: CharSkillInput[] = cached
+    ? cached.skills.map(s => ({ skillId: s.skillId, trainedLevel: s.trainedLevel, skillpointsInSkill: s.skillpointsInSkill }))
+    : bodySkills
 
   // Parse EFT fit format
   const lines = fitText.trim().split('\n').map(l => l.trim())
@@ -3312,7 +3547,12 @@ app.post('/api/skills/analyze-fit', async (req, res) => {
     const ROMAN = ['', 'I', 'II', 'III', 'IV', 'V']
     const skillPlanLines = missingSkills
       .sort((a, b) => a.rank - b.rank)
-      .map(s => `${s.skillName} ${s.requiredLevel}`)
+      .map(s => {
+        const cleanName = s.skillName.replace(/[^\x20-\x7E]/g, '').trim()
+        const line = `${cleanName} ${ROMAN[s.requiredLevel]}`
+        console.log('[skill-plan] line repr:', JSON.stringify(line))
+        return line
+      })
     const skillPlanText = skillPlanLines.join('\n')
 
     res.json({
@@ -3341,15 +3581,21 @@ function applyPronunciations(text: string, entries: PronunciationEntry[]): strin
   return out
 }
 
+// ── ElevenLabs live credential update (dev/browser — Electron uses IPC) ──
+app.post('/api/settings/voice', (req, res) => {
+  const { apiKey, voiceId } = req.body as { apiKey?: string; voiceId?: string }
+  if (apiKey)  process.env.ELEVENLABS_API_KEY  = apiKey
+  if (voiceId) process.env.ELEVENLABS_VOICE_ID = voiceId
+  res.json({ ok: true })
+})
+
 // ── ElevenLabs TTS proxy ──────────────────────────────────────────────────
 app.post('/api/tts', async (req, res) => {
-  const { text, mode = 'standard', variant = 'cute' } = req.body as { text: string; mode?: 'concise' | 'standard' | 'full'; variant?: 'cute' | 'hot' }
+  const { text, mode = 'standard' } = req.body as { text: string; mode?: 'concise' | 'standard' | 'full' }
   if (!text?.trim()) return res.status(400).json({ error: 'text required' })
 
   const apiKey = process.env.ELEVENLABS_API_KEY
-  const voiceId = variant === 'hot'
-    ? (process.env.ELEVENLABS_VOICE_ID_HOT || process.env.ELEVENLABS_VOICE_ID)
-    : process.env.ELEVENLABS_VOICE_ID
+  const voiceId = process.env.ELEVENLABS_VOICE_ID
   if (!apiKey || !voiceId) return res.status(503).json({ error: 'ElevenLabs not configured' })
 
   const pronunciations = loadPronunciations()
@@ -3395,6 +3641,31 @@ app.post('/api/tts', async (req, res) => {
   } catch (err) {
     console.error('TTS error:', err)
     res.status(500).json({ error: 'TTS failed' })
+  }
+})
+
+// Proxy the Vosk model download so the renderer avoids CORS and cross-origin issues
+const VOSK_MODEL_URL = 'https://alphacephei.com/vosk/models/vosk-model-small-en-us-0.15.tar.gz'
+app.get('/api/vosk-model', async (_req, res) => {
+  try {
+    const upstream = await fetch(VOSK_MODEL_URL)
+    if (!upstream.ok) { res.status(502).send('upstream fetch failed'); return }
+    const ct = upstream.headers.get('content-type') ?? 'application/gzip'
+    const cl = upstream.headers.get('content-length')
+    res.setHeader('Content-Type', ct)
+    res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin')
+    if (cl) res.setHeader('Content-Length', cl)
+    const reader = upstream.body!.getReader()
+    const pump = async () => {
+      const { done, value } = await reader.read()
+      if (done) { res.end(); return }
+      res.write(Buffer.from(value))
+      await pump()
+    }
+    await pump()
+  } catch (err) {
+    console.error('vosk-model proxy error:', err)
+    res.status(500).send('proxy error')
   }
 })
 

@@ -26,6 +26,7 @@ import WalletWindow from './components/panels/WalletWindow'
 import UsageBar from './components/UsageBar'
 import TitleBar from './components/TitleBar'
 import OptionsMenu from './components/OptionsMenu'
+import FeedbackModal from './components/FeedbackModal'
 import SetupScreen from './components/SetupScreen'
 import { useChat } from './hooks/useChat'
 import { useEve } from './hooks/useEve'
@@ -49,29 +50,35 @@ declare global {
       onUpdateProgress: (cb: (percent: number) => void) => void
       onUpdateDownloaded: (cb: (version: string) => void) => void
       installUpdate: () => void
+      captureScreenshot: () => Promise<string | null>
     }
   }
 }
 
 export default function App() {
   const [darkMode, setDarkMode] = useState(true)
+
+  // Apply persisted display preferences on mount
+  useEffect(() => {
+    const size = localStorage.getItem('aurora_font_size')
+    const density = localStorage.getItem('aurora_font_density')
+    if (size) document.documentElement.style.fontSize = size
+    if (density) {
+      document.documentElement.style.setProperty('--aurora-line-height', density)
+      document.body.dataset.density = density
+    }
+  }, [])
   const [setupMissing, setSetupMissing] = useState<string[]>([])
   const [updateState, setUpdateState] = useState<{ version: string; progress?: number; ready: boolean } | null>(null)
   const [activePanel, setActivePanel] = useState<ActivePanel>('chat')
-  const [auroraVariant, setAuroraVariant] = useState<'cute' | 'hot'>(() =>
-    (localStorage.getItem('aurora_image_variant') as 'cute' | 'hot') ?? 'cute'
-  )
-  const toggleAuroraVariant = () => {
-    const next: 'cute' | 'hot' = auroraVariant === 'cute' ? 'hot' : 'cute'
-    setAuroraVariant(next)
-    localStorage.setItem('aurora_image_variant', next)
-  }
   const [showLanding, setShowLanding] = useState(true)
   const [showVoiceBubble, setShowVoiceBubble] = useState(false)
   const [showVoiceSettings, setShowVoiceSettings] = useState(false)
   const [zkillTarget, setZkillTarget] = useState<ZkillTarget | null>(null)
   const [showWalletWindow, setShowWalletWindow] = useState(false)
   const prevPanelRef = useRef<ActivePanel>('chat')
+  const [showFeedback, setShowFeedback] = useState(false)
+  const [feedbackScreenshot, setFeedbackScreenshot] = useState<string | null>(null)
   const [freightImport, setFreightImport] = useState<{ collateral: number; volume: number } | null>(null)
   const [blueprintImport, setBlueprintImport] = useState<{ typeId: number; typeName: string; me: number; te: number; runs: number } | null>(null)
   const [editMessage, setEditMessage] = useState<{ id: string; content: string } | null>(null)
@@ -249,7 +256,6 @@ export default function App() {
             streaming={chat.streaming}
             isSpeaking={chat.isSpeaking}
             toolStatus={chat.toolStatus}
-            auroraVariant={auroraVariant}
             onOpenComms={() => {
               setShowVoiceBubble(false)
               setShowLanding(false)
@@ -292,8 +298,6 @@ export default function App() {
           onRefresh={eve.refreshAllCharacters}
           onLogout={eve.logout}
           onSwitchCharacter={eve.switchCharacter}
-          auroraVariant={auroraVariant}
-          onToggleVariant={toggleAuroraVariant}
           darkMode={darkMode}
           onToggleDark={() => setDarkMode(v => !v)}
         />
@@ -357,6 +361,11 @@ export default function App() {
         />
       )}
 
+      {/* Feedback modal */}
+      {showFeedback && (
+        <FeedbackModal activePanel={activePanel} screenshot={feedbackScreenshot} onClose={() => setShowFeedback(false)} />
+      )}
+
       {/* Voice settings modal */}
       {showVoiceSettings && (
         <VoiceSettingsModal
@@ -399,6 +408,18 @@ export default function App() {
             <span>NEW EDEN · YC {new Date().getFullYear() - 1898}</span>
           </div>
           <span className="text-eve-dim">{new Date().toUTCString().slice(17, 25)} UTC</span>
+
+          <button
+            onClick={async () => {
+              const shot = window.electronAPI?.captureScreenshot ? await window.electronAPI.captureScreenshot() : null
+              setFeedbackScreenshot(shot)
+              setShowFeedback(true)
+            }}
+            title="Submit bug or feedback"
+            className="text-eve-muted hover:text-eve-gold transition-colors text-[10px] tracking-widest font-mono border border-eve-border hover:border-eve-gold/50 px-2 py-0.5 rounded-sm"
+          >
+            FEEDBACK
+          </button>
 
           <OptionsMenu darkMode={darkMode} setDarkMode={setDarkMode} />
 
@@ -455,7 +476,6 @@ export default function App() {
           characterName={eve.character?.characterName}
           voiceEnabled={chat.voiceEnabled}
           autoListenTrigger={chat.autoListenTrigger}
-          auroraVariant={auroraVariant}
           onVoiceQuery={(text) => {
             handleVoiceQuery(text, (t) => { chat.sendInNewSession(t); setActivePanel('chat') })
           }}
@@ -537,7 +557,7 @@ export default function App() {
                     skillQueue={eve.skillQueue}
                     loading={eve.loading}
                     onRefresh={eve.refreshAllCharacters}
-                    characterId={eve.characters[0]?.characterId}
+                    characterId={eve.character?.characterId}
                   />
                 )}
                 {activePanel === 'industry' && (

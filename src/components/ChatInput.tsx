@@ -97,7 +97,7 @@ export default function ChatInput({
   }
 
   // ── Derived display ───────────────────────────────────────────────────────
-  const { phase, interimText, countdown, wakeArmed, isListening, isSupported } = voice
+  const { phase, interimText, countdown, wakeArmed, isListening, isSupported, voskStatus, voskDownloadPct } = voice
 
   const micColor =
     phase === 'pending'   ? 'border-eve-gold text-eve-gold bg-eve-gold/10' :
@@ -196,7 +196,11 @@ export default function ChatInput({
               whileTap={{ scale: 0.95 }}
               onClick={voice.toggleWakeMode}
               disabled={streaming}
-              title={wakeArmed ? 'Disarm wake word ("Aurora")' : 'Arm wake word — say "Aurora" to activate'}
+              title={
+                voskStatus === 'loading' ? `Downloading voice model… ${voskDownloadPct}%` :
+                voskStatus === 'error'   ? 'Voice model failed to load — check console' :
+                wakeArmed ? 'Disarm wake word ("Aurora")' : 'Arm wake word — say "Aurora" to activate'
+              }
               className={`px-2 py-2.5 border font-mono transition-all disabled:opacity-30 disabled:cursor-not-allowed ${wakeColor}`}
             >
               <motion.div

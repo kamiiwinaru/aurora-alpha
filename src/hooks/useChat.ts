@@ -99,7 +99,7 @@ export function useChat(eveContext?: EveContext) {
   // question — ChatInput watches this to auto-start listening without a wake word.
   const [autoListenTrigger, setAutoListenTrigger] = useState(0)
   const abortRef = useRef<AbortController | null>(null)
-  const audioRef = useRef<HTMLAudioElement | null>(null)
+  const audioRef = useRef<{ pause(): void } | null>(null)
   // Cache diagnostics: maps convId → last Anthropic response id.
   // Sent as previousMessageId so the server can compare consecutive requests
   // and detect prompt cache misses (beta feature: cache-diagnosis-2026-04-07).
@@ -513,31 +513,25 @@ If the pilot asks about the game, high scores, strategy, or their current ship t
         const ttsRes = await fetch('/api/tts', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ text: accumulated, mode: ttsMode, variant: localStorage.getItem('aurora_image_variant') ?? 'cute' }),
+          body: JSON.stringify({ text: accumulated, mode: ttsMode }),
         })
         if (ttsRes.ok) {
-          const blob = await ttsRes.blob()
-          const url = URL.createObjectURL(blob)
-          const audio = new Audio(url)
-          audioRef.current = audio
-          // Detect whether Aurora's response ended with a question so we can
-          // auto-arm the mic — strip markdown, then check the final sentence.
-          const plainText = accumulated
-            .replace(/```[\s\S]*?```/g, '')
-            .replace(/\|[^\n]+\|/g, '')
-            .replace(/[*_`#]/g, '')
-            .trim()
-          audio.onended = () => {
-            URL.revokeObjectURL(url)
+          const arrayBuffer = await ttsRes.arrayBuffer()
+          const ctx = new AudioContext()
+          const audioBuffer = await ctx.decodeAudioData(arrayBuffer)
+          const source = ctx.createBufferSource()
+          source.buffer = audioBuffer
+          const gain = ctx.createGain()
+          gain.gain.value = Number(localStorage.getItem('aurora_tts_volume') ?? '1')
+          source.connect(gain)
+          gain.connect(ctx.destination)
+          audioRef.current = { pause: () => { try { source.stop() } catch { /**/ } ctx.close() } }
+          source.onended = () => {
+            ctx.close()
             audioRef.current = null
             setIsSpeaking(false)
           }
-          audio.onerror = () => {
-            URL.revokeObjectURL(url)
-            audioRef.current = null
-            setIsSpeaking(false)
-          }
-          await audio.play()
+          source.start(0)
         } else {
           setIsSpeaking(false)
         }
@@ -681,21 +675,22 @@ If the pilot asks about the game, high scores, strategy, or their current ship t
         const ttsRes = await fetch('/api/tts', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ text: accumulated, mode: ttsMode, variant: localStorage.getItem('aurora_image_variant') ?? 'cute' }),
+          body: JSON.stringify({ text: accumulated, mode: ttsMode }),
         })
         if (ttsRes.ok) {
-          const blob = await ttsRes.blob()
-          const url = URL.createObjectURL(blob)
-          const audio = new Audio(url)
-          audioRef.current = audio
-          const plainText = accumulated.replace(/```[\s\S]*?```/g, '').replace(/\|[^\n]+\|/g, '').replace(/[*_`#]/g, '').trim()
-          audio.onended = () => {
-            URL.revokeObjectURL(url)
+          const arrayBuffer = await ttsRes.arrayBuffer()
+          const ctx = new AudioContext()
+          const audioBuffer = await ctx.decodeAudioData(arrayBuffer)
+          const source = ctx.createBufferSource()
+          source.buffer = audioBuffer
+          source.connect(ctx.destination)
+          audioRef.current = { pause: () => { try { source.stop() } catch { /**/ } ctx.close() } }
+          source.onended = () => {
+            ctx.close()
             audioRef.current = null
             setIsSpeaking(false)
           }
-          audio.onerror = () => { URL.revokeObjectURL(url); audioRef.current = null; setIsSpeaking(false) }
-          await audio.play()
+          source.start(0)
         } else {
           setIsSpeaking(false)
         }

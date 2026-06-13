@@ -4,20 +4,18 @@ import { X, Minus, MessageSquare, ChevronUp } from 'lucide-react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import type { Message } from '../types'
-import AURORA_IMG from '../assets/Aurora.png'
-import AURORA_HOT_IMG from '../assets/Aurora_hot.png'
+import AURORA_IMG from '../assets/Aurora1.png'
 
 interface VoiceBubbleProps {
   messages: Message[]
   streaming: boolean
   isSpeaking: boolean
   toolStatus: string | null
-  auroraVariant: 'cute' | 'hot'
   onOpenComms: () => void
   onClose: () => void
 }
 
-function AuroraThumb({ isSpeaking, variant }: { isSpeaking: boolean; variant: 'cute' | 'hot' }) {
+function AuroraThumb({ isSpeaking }: { isSpeaking: boolean }) {
   const [failed, setFailed] = useState(false)
   return (
     <motion.div
@@ -34,7 +32,7 @@ function AuroraThumb({ isSpeaking, variant }: { isSpeaking: boolean; variant: 'c
       {failed ? (
         <div className="w-full h-full bg-eve-dim flex items-center justify-center text-eve-cyan/40 text-[10px] font-mono">◈</div>
       ) : (
-        <img src={variant === 'hot' ? AURORA_HOT_IMG : AURORA_IMG} alt="Aurora" className={`w-full h-full object-cover ${variant === 'hot' ? 'object-top' : 'object-center'}`} onError={() => setFailed(true)} />
+        <img src={AURORA_IMG} alt="Aurora" className="w-full h-full object-cover object-top" onError={() => setFailed(true)} />
       )}
       {/* Scan line */}
       <motion.div
@@ -57,7 +55,7 @@ function StreamingCursor() {
   )
 }
 
-export default function VoiceBubble({ messages, streaming, isSpeaking, toolStatus, auroraVariant, onOpenComms, onClose }: VoiceBubbleProps) {
+export default function VoiceBubble({ messages, streaming, isSpeaking, toolStatus, onOpenComms, onClose }: VoiceBubbleProps) {
   const [minimized, setMinimized] = useState(false)
   const scrollRef = useRef<HTMLDivElement>(null)
 
@@ -119,7 +117,7 @@ export default function VoiceBubble({ messages, streaming, isSpeaking, toolStatu
                     />
                   ))}
                 </AnimatePresence>
-                <AuroraThumb isSpeaking={isSpeaking || isAssistantStreaming} variant={auroraVariant} />
+                <AuroraThumb isSpeaking={isSpeaking || isAssistantStreaming} />
               </div>
 
               <div className="flex-1 min-w-0">

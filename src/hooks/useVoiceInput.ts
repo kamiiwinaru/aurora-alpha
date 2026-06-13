@@ -1,26 +1,11 @@
 import { useState, useRef, useCallback, useEffect } from 'react'
+import { loadVoskModel, prewarmAudio, VoskSession, type VoskStatus } from '../lib/voskRecognizer'
 
 export type VoicePhase = 'off' | 'standby' | 'activated' | 'listening' | 'pending'
 
 // Silence delay before auto-submit (ms)
 const SILENCE_DELAY = 2000
 
-const MIC_DEVICE_KEY = 'aurora_mic_device_id'
-
-// Prime Chromium's audio pipeline to the selected device.
-// SpeechRecognition follows the most recently activated getUserMedia stream.
-async function primeMic(): Promise<void> {
-  const deviceId = localStorage.getItem(MIC_DEVICE_KEY)
-  if (!deviceId || deviceId === 'default') return
-  try {
-    const stream = await navigator.mediaDevices.getUserMedia({
-      audio: { deviceId: { exact: deviceId } },
-    })
-    stream.getTracks().forEach(t => t.stop())
-  } catch {
-    // ignore — falls back to system default
-  }
-}
 
 function getSpeechRecognition(): (new () => SpeechRecognition) | null {
   if (typeof window === 'undefined') return null
@@ -72,9 +57,77 @@ export function useVoiceInput({
   const silenceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const countdownIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const startWakeRef = useRef<() => void>(() => {})
+  const armSilenceTimerRef = useRef<() => void>(() => {})
 
   useEffect(() => { phaseRef.current = phase }, [phase])
   useEffect(() => { valueRef.current = value }, [value])
+
+  // ── Vosk (Electron only) ────────────────────────────────────────────────
+  const isElectron = !!window.electronAPI
+  const [voskStatus, setVoskStatus] = useState<VoskStatus>('idle')
+  const [voskDownloadPct, setVoskDownloadPct] = useState(0)
+  const voskSessionRef = useRef<VoskSession | null>(null)
+  const voskPartialRef = useRef('')
+
+  const ensureVoskReady = useCallback(async () => {
+    if (!isElectron || voskStatus === 'ready' || voskStatus === 'loading') return
+    setVoskStatus('loading')
+    try {
+      await loadVoskModel(pct => setVoskDownloadPct(pct))
+      setVoskStatus('ready')
+      prewarmAudio()
+    } catch (err) {
+      console.error('Vosk model load failed:', err)
+      setVoskStatus('error')
+    }
+  }, [isElectron, voskStatus])
+
+  // Pre-load the model immediately on Electron mount so it's ready when the user first speaks
+  useEffect(() => {
+    if (isElectron) ensureVoskReady()
+  }, []) // eslint-disable-line react-hooks/exhaustive-deps
+
+  const stopVosk = useCallback(() => {
+    voskSessionRef.current?.stop()
+    voskSessionRef.current = null
+    voskPartialRef.current = ''
+    setInterimText('')
+  }, [])
+
+  const startVosk = useCallback(async (prefill = '') => {
+    if (voskStatus !== 'ready') return
+    stopVosk()
+
+    if (prefill) {
+      setValue(prev => {
+        const base = prev.trimEnd()
+        return base ? `${base} ${prefill}` : prefill
+      })
+    }
+
+    setPhase('listening')
+    try {
+      const model = await loadVoskModel()
+      const session = await VoskSession.create(model, ({ text, partial }) => {
+        if (partial) {
+          voskPartialRef.current = text
+          setInterimText(text)
+        } else {
+          voskPartialRef.current = ''
+          setInterimText('')
+          setValue(prev => {
+            const base = prev.trimEnd()
+            return base ? `${base} ${text}` : text
+          })
+          armSilenceTimerRef.current()
+        }
+      })
+      voskSessionRef.current = session
+    } catch (err) {
+      console.error('Vosk session failed:', err)
+      setPhase(wakeEnabledRef.current ? 'standby' : 'off')
+    }
+  }, [voskStatus, stopVosk])
 
   // ── Silence / countdown timer ───────────────────────────────────────────
   const clearSilenceTimer = useCallback(() => {
@@ -120,13 +173,19 @@ export function useVoiceInput({
 
   // ── Active listening session ────────────────────────────────────────────
   const stopActive = useCallback(() => {
+    if (isElectron) {
+      stopVosk()
+      clearSilenceTimer()
+      return
+    }
     activeRef.current?.stop()
     activeRef.current = null
     clearSilenceTimer()
     setInterimText('')
-  }, [clearSilenceTimer])
+  }, [isElectron, stopVosk, clearSilenceTimer])
 
   const startActive = useCallback((prefill = '') => {
+    if (isElectron) { startVosk(prefill); return }
     if (!SpeechRecognitionClass) return
     stopActive()
 
@@ -137,7 +196,6 @@ export function useVoiceInput({
       })
     }
 
-    primeMic().then(() => {
     const rec = new SpeechRecognitionClass()
     rec.continuous = true
     rec.interimResults = true
@@ -178,7 +236,6 @@ export function useVoiceInput({
 
     activeRef.current = rec
     rec.start()
-    }) // primeMic
   }, [SpeechRecognitionClass, stopActive, armSilenceTimer])
 
   // ── Wake word listener ──────────────────────────────────────────────────
@@ -245,11 +302,39 @@ export function useVoiceInput({
   }, [SpeechRecognitionClass, startActive])
 
   useEffect(() => { startWakeRef.current = startWake }, [startWake])
+  useEffect(() => { armSilenceTimerRef.current = armSilenceTimer }, [armSilenceTimer])
 
   // Start wake listener whenever phase enters standby
+  // In Electron, Vosk handles wake detection via a continuous session
   useEffect(() => {
-    if (phase === 'standby' && wakeEnabledRef.current) startWake()
-  }, [phase, startWake])
+    if (phase !== 'standby' || !wakeEnabledRef.current) return
+    if (isElectron) {
+      if (voskStatus !== 'ready') return
+      // Run Vosk continuously in standby — look for wake word in partial results
+      let session: VoskSession | null = null
+      loadVoskModel().then(async model => {
+        if (phaseRef.current !== 'standby') return
+        session = await VoskSession.create(model, ({ text, partial }) => {
+          if (phaseRef.current !== 'standby') { session?.stop(); session = null; return }
+          const t = (text || '').toLowerCase()
+          if (containsWakeWord(t)) {
+            session?.stop()
+            session = null
+            const afterWake = stripWakeWord(t)
+            setPhase('activated')
+            setTimeout(() => {
+              if (wakeEnabledRef.current) startActive(afterWake)
+            }, 50)
+          } else if (!partial && t) {
+            // non-wake utterance — ignore but reset
+          }
+        })
+        voskSessionRef.current = session
+      }).catch(() => {})
+      return () => { session?.stop(); session = null }
+    }
+    startWake()
+  }, [phase, isElectron, voskStatus, startWake, startActive])
 
   // ── Wake mode toggle ────────────────────────────────────────────────────
   const toggleWakeMode = useCallback(() => {
@@ -264,8 +349,10 @@ export function useVoiceInput({
     } else {
       wakeEnabledRef.current = true
       setPhase('standby')
+      // In Electron, kick off model download immediately so it's ready when needed
+      if (isElectron) ensureVoskReady()
     }
-  }, [stopWake, stopActive, clearSilenceTimer])
+  }, [isElectron, ensureVoskReady, stopWake, stopActive, clearSilenceTimer])
 
   // ── Manual mic toggle ───────────────────────────────────────────────────
   const toggleManualMic = useCallback(() => {
@@ -299,14 +386,15 @@ export function useVoiceInput({
     return () => {
       wakeEnabledRef.current = false
       stopWake()
+      stopVosk()
       stopActive()
       clearSilenceTimer()
     }
-  }, [stopWake, stopActive, clearSilenceTimer])
+  }, [stopWake, stopVosk, stopActive, clearSilenceTimer])
 
   const wakeArmed = phase === 'standby' || phase === 'activated'
   const isListening = phase === 'listening' || phase === 'pending'
-  const isSupported = !!SpeechRecognitionClass
+  const isSupported = isElectron || !!SpeechRecognitionClass
 
   return {
     phase,
@@ -317,6 +405,8 @@ export function useVoiceInput({
     wakeArmed,
     isListening,
     isSupported,
+    voskStatus,
+    voskDownloadPct,
     toggleWakeMode,
     toggleManualMic,
     startActive,

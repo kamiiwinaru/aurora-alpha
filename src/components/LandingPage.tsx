@@ -1,16 +1,15 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { LogIn, LogOut, ExternalLink, RefreshCw, Shield, Zap, TrendingUp, MapPin, Cpu, Star, MessageSquare, Radio, UserPlus, Mic, X, Package, ChevronDown, ChevronUp, Sun, Moon } from 'lucide-react'
+import { LogIn, LogOut, ExternalLink, RefreshCw, Shield, Zap, TrendingUp, MapPin, Cpu, Star, MessageSquare, Radio, UserPlus, Mic, X, Package, ChevronDown, ChevronUp } from 'lucide-react'
+import OptionsMenu from './OptionsMenu'
+import FeedbackModal from './FeedbackModal'
 import type { EveCharacter, EveSkill, EveShipLocation, EveCharacterAttributes, EveMail, EveMailLabel, EveContract, EveNotification, EveWalletTransaction, EveWalletJournalEntry } from '../types'
 import { renderMessage } from '../lib/intel-highlight'
 import { useVoiceInput, type VoicePhase } from '../hooks/useVoiceInput'
 
-import AURORA_IMG from '../assets/Aurora.png'
-import AURORA_HOT_IMG from '../assets/Aurora_hot.png'
+import AURORA_IMG from '../assets/Aurora1.png'
 
-type AuroraVariant = 'cute' | 'hot'
-
-function AuroraImageCorner({ variant }: { variant: AuroraVariant }) {
+function AuroraImageCorner() {
   const [failed, setFailed] = useState(false)
   if (failed) {
     return (
@@ -22,8 +21,7 @@ function AuroraImageCorner({ variant }: { variant: AuroraVariant }) {
       </div>
     )
   }
-  const src = variant === 'hot' ? AURORA_HOT_IMG : AURORA_IMG
-  return <img src={src} alt="Aurora" className={`w-full h-full object-cover ${variant === 'hot' ? 'object-top' : 'object-center'}`} onError={() => setFailed(true)} />
+  return <img src={AURORA_IMG} alt="Aurora" className="w-full h-full object-cover object-top" onError={() => setFailed(true)} />
 }
 import { getEveLoginUrl, resolveIds, formatISK } from '../lib/eve-esi'
 import ContractDetailWindow, { CONTRACT_TYPE_ABBR, CONTRACT_STATUS_COLOR, contractDaysLeft } from './panels/ContractDetailWindow'
@@ -46,8 +44,6 @@ interface Props {
   isSpeaking: boolean
   voiceEnabled?: boolean
   autoListenTrigger?: number
-  auroraVariant: 'cute' | 'hot'
-  onToggleVariant: () => void
   onEnter: () => void
   onOpenComms: () => void
   onVoiceQuery?: (text: string) => void
@@ -61,6 +57,7 @@ interface Props {
   onSwitchCharacter?: (id: number) => void
   darkMode?: boolean
   onToggleDark?: () => void
+  onFeedback?: () => void
 }
 
 // ── Portrait (size must be 64 | 128 | 256 | 512) ──────────────────────────────
@@ -228,13 +225,12 @@ function secColor(sec: number) {
 }
 
 // ── Aurora corner model ───────────────────────────────────────────────────────
-function AuroraCorner({ isSpeaking, phase, wakeArmed, isListening, isSupported, variant, onToggleWake, onToggleMic, onOpenComms }: {
+function AuroraCorner({ isSpeaking, phase, wakeArmed, isListening, isSupported, onToggleWake, onToggleMic, onOpenComms }: {
   isSpeaking: boolean
   phase: VoicePhase
   wakeArmed: boolean
   isListening: boolean
   isSupported: boolean
-  variant: AuroraVariant
   onToggleWake: () => void
   onToggleMic: () => void
   onOpenComms: () => void
@@ -347,7 +343,7 @@ function AuroraCorner({ isSpeaking, phase, wakeArmed, isListening, isSupported, 
           transition={{ duration: voiceActive ? 0.7 : 3, repeat: Infinity }}
         >
           <div className="w-full h-full relative overflow-hidden">
-            <AuroraImageCorner variant={variant} />
+            <AuroraImageCorner />
             <motion.div
               className="absolute inset-x-0 pointer-events-none"
               style={{ height: '35%', background: 'linear-gradient(180deg, transparent, rgba(0,212,255,0.07), transparent)' }}
@@ -423,7 +419,7 @@ function AuroraCorner({ isSpeaking, phase, wakeArmed, isListening, isSupported, 
 }
 
 // ── Login Screen ──────────────────────────────────────────────────────────────
-function LoginScreen({ darkMode, onToggleDark }: { darkMode?: boolean; onToggleDark?: () => void }) {
+function LoginScreen({ darkMode, onToggleDark, onFeedback }: { darkMode?: boolean; onToggleDark?: () => void; onFeedback?: () => void }) {
   const handleLogin = () => { window.location.href = getEveLoginUrl() }
 
   return (
@@ -482,19 +478,23 @@ function LoginScreen({ darkMode, onToggleDark }: { darkMode?: boolean; onToggleD
         </div>
       </motion.div>
 
-      {/* Theme toggle — top-right */}
-      {onToggleDark && (
-        <motion.button
-          initial={{ opacity: 0 }}
-          animate={{ opacity: 1 }}
-          transition={{ delay: 0.8 }}
-          onClick={onToggleDark}
-          title={darkMode ? 'Switch to light mode' : 'Switch to dark mode'}
-          className="absolute top-4 right-4 p-2 border border-eve-border/40 text-eve-muted hover:text-eve-cyan hover:border-eve-cyan/40 transition-all"
-        >
-          {darkMode ? <Sun size={14} /> : <Moon size={14} />}
-        </motion.button>
-      )}
+      {/* Options cog — top-right */}
+      <motion.div
+        initial={{ opacity: 0 }}
+        animate={{ opacity: 1 }}
+        transition={{ delay: 0.8 }}
+        className="absolute top-4 right-4 flex items-center gap-2"
+      >
+        {onFeedback && (
+          <button
+            onClick={onFeedback}
+            className="text-eve-muted hover:text-eve-gold transition-colors text-[10px] tracking-widest font-mono border border-eve-border hover:border-eve-gold/50 px-2 py-0.5 rounded-sm"
+          >
+            FEEDBACK
+          </button>
+        )}
+        <OptionsMenu darkMode={darkMode} setDarkMode={onToggleDark ? () => onToggleDark() : undefined} />
+      </motion.div>
     </div>
   )
 }
@@ -939,7 +939,7 @@ function ContractsFeed({ contracts, character }: { contracts: EveContract[]; cha
 
 // ── Character Showcase ────────────────────────────────────────────────────────
 function CharacterShowcase(props: Omit<Props, 'character'> & { character: EveCharacter }) {
-  const { character, characters, skills, walletBalance, walletTransactions, walletJournal, allWalletBalances, allWalletJournals, allWalletTransactions, securityStatus, shipLocation, attributes, loading, isSpeaking, voiceEnabled, autoListenTrigger, auroraVariant, onToggleVariant, onEnter, onOpenComms, onVoiceQuery, onRefresh, onLogout, onSwitchCharacter, mail, mailLabels, notifications, contracts, onOpenNotifications, darkMode, onToggleDark } = props
+  const { character, characters, skills, walletBalance, walletTransactions, walletJournal, allWalletBalances, allWalletJournals, allWalletTransactions, securityStatus, shipLocation, attributes, loading, isSpeaking, voiceEnabled, autoListenTrigger, onEnter, onOpenComms, onVoiceQuery, onRefresh, onLogout, onSwitchCharacter, mail, mailLabels, notifications, contracts, onOpenNotifications, darkMode, onToggleDark, onFeedback } = props
   const [corpName, setCorpName] = useState('')
   const [allianceName, setAllianceName] = useState('')
   const [showWallet, setShowWallet] = useState(false)
@@ -991,30 +991,15 @@ function CharacterShowcase(props: Omit<Props, 'character'> & { character: EveCha
           <span className="text-eve-dim text-[9px] tracking-widest">PILOT DOSSIER</span>
         </div>
         <div className="flex items-center gap-2">
-          {/* Aurora image toggle */}
-          <div className="flex items-center border border-eve-border/60 overflow-hidden text-[9px] font-mono tracking-widest shrink-0">
+          {onFeedback && (
             <button
-              onClick={() => auroraVariant !== 'cute' && onToggleVariant()}
-              className={`px-2.5 py-1.5 transition-colors ${auroraVariant === 'cute' ? 'bg-eve-cyan/15 text-eve-cyan border-r border-eve-cyan/30' : 'text-eve-muted hover:text-eve-cyan/60 border-r border-eve-border/40'}`}
+              onClick={onFeedback}
+              className="text-eve-muted hover:text-eve-gold transition-colors text-[10px] tracking-widest font-mono border border-eve-border hover:border-eve-gold/50 px-2 py-0.5 rounded-sm"
             >
-              CUTE
-            </button>
-            <button
-              onClick={() => auroraVariant !== 'hot' && onToggleVariant()}
-              className={`px-2.5 py-1.5 transition-colors ${auroraVariant === 'hot' ? 'bg-eve-gold/10 text-eve-gold' : 'text-eve-muted hover:text-eve-gold/60'}`}
-            >
-              HOT
-            </button>
-          </div>
-          {onToggleDark && (
-            <button
-              onClick={onToggleDark}
-              title={darkMode ? 'Switch to light mode' : 'Switch to dark mode'}
-              className="eve-btn flex items-center gap-1.5 text-[10px]"
-            >
-              {darkMode ? <Sun size={10} /> : <Moon size={10} />}
+              FEEDBACK
             </button>
           )}
+          <OptionsMenu darkMode={darkMode} setDarkMode={onToggleDark ? () => onToggleDark() : undefined} />
           <button onClick={onRefresh} className="eve-btn flex items-center gap-1.5 text-[10px]" disabled={loading}>
             <RefreshCw size={10} className={loading ? 'animate-spin' : ''} />
             {!loading && <span>REFRESH</span>}
@@ -1048,7 +1033,7 @@ function CharacterShowcase(props: Omit<Props, 'character'> & { character: EveCha
           />
 
           {/* Character switcher row — mini portraits + add button */}
-          <div className="flex items-center gap-2 z-10">
+          <div className="flex flex-wrap items-center justify-center gap-2 z-10 max-w-xs">
             {characters.map(c => (
               <MiniPortrait
                 key={c.characterId}
@@ -1114,7 +1099,6 @@ function CharacterShowcase(props: Omit<Props, 'character'> & { character: EveCha
               wakeArmed={voice.wakeArmed}
               isListening={voice.isListening}
               isSupported={voice.isSupported}
-              variant={auroraVariant}
               onToggleWake={voice.toggleWakeMode}
               onToggleMic={voice.toggleManualMic}
               onOpenComms={onOpenComms}
@@ -1250,6 +1234,16 @@ function CharacterShowcase(props: Omit<Props, 'character'> & { character: EveCha
 
 // ── Main export ───────────────────────────────────────────────────────────────
 export default function LandingPage(props: Props) {
+  const [showFeedback, setShowFeedback] = useState(false)
+  const [feedbackScreenshot, setFeedbackScreenshot] = useState<string | null>(null)
+  const feedbackPanel = props.character ? 'landing' : 'landing-login'
+
+  async function openFeedback() {
+    const shot = window.electronAPI?.captureScreenshot ? await window.electronAPI.captureScreenshot() : null
+    setFeedbackScreenshot(shot)
+    setShowFeedback(true)
+  }
+
   return (
     <AnimatePresence mode="wait">
       <motion.div
@@ -1262,9 +1256,12 @@ export default function LandingPage(props: Props) {
       >
         <div className="scanline-overlay" />
         {props.character
-          ? <CharacterShowcase {...props} character={props.character} />
-          : <LoginScreen darkMode={props.darkMode} onToggleDark={props.onToggleDark} />
+          ? <CharacterShowcase {...props} character={props.character} onFeedback={openFeedback} />
+          : <LoginScreen darkMode={props.darkMode} onToggleDark={props.onToggleDark} onFeedback={openFeedback} />
         }
+        {showFeedback && (
+          <FeedbackModal activePanel={feedbackPanel as import('../types').ActivePanel} screenshot={feedbackScreenshot} onClose={() => setShowFeedback(false)} />
+        )}
       </motion.div>
     </AnimatePresence>
   )

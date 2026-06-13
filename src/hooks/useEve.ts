@@ -469,7 +469,7 @@ export function useEve() {
           isBuyOrder: o.is_buy_order,
           issued: o.issued,
           duration: o.duration,
-          state: o.state as EveMarketOrder['state'],
+          state: (o.state as EveMarketOrder['state']) ?? 'active',
         }))
         if (isActive) setMarketOrders(mappedOrders)
         setAllMarketOrders(prev => ({ ...prev, [id]: mappedOrders }))
@@ -963,6 +963,21 @@ export function useEve() {
     const token = char.accessToken
     const id = char.characterId
 
+    // Quick auth check — if the token is dead, drop the character rather than spamming 401s
+    try {
+      const probe = await fetch(`https://esi.evetech.net/latest/characters/${id}/wallet/`, {
+        headers: { Authorization: `Bearer ${token}` },
+      })
+      if (probe.status === 401) {
+        setCharacters(prev => {
+          const next = prev.filter(c => c.characterId !== id)
+          saveCharacters(next)
+          return next
+        })
+        return
+      }
+    } catch { /* network error — skip silently */ }
+
     const [balanceRes, journalRes, txRes, assetsRes, jobsRes, ordersRes] = await Promise.allSettled([
       getWalletBalance(id, token),
       getWalletJournal(id, token),
@@ -1044,7 +1059,7 @@ export function useEve() {
         orderId: o.order_id, typeId: o.type_id, typeName: names[o.type_id],
         locationId: o.location_id, volumeTotal: o.volume_total, volumeRemain: o.volume_remain,
         price: o.price, isBuyOrder: o.is_buy_order, issued: o.issued,
-        duration: o.duration, state: o.state as EveMarketOrder['state'],
+        duration: o.duration, state: (o.state as EveMarketOrder['state']) ?? 'active',
       }))
       setAllMarketOrders(prev => ({ ...prev, [id]: mapped }))
     }

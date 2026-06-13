@@ -1,5 +1,32 @@
 # Changelog
 
+## [1.0.4] — 2026-06-13
+
+### Added
+- In-app feedback tool — a FEEDBACK button in the header and landing page lets you submit bugs, UI issues, and feature requests with an optional screenshot, sent directly to a Discord channel.
+- Trade Agent (Market panel) — new scan modes: Relist (spread opportunities with 30-day volume filtering), Mislisted (negative-spread items to flip), and High Volume (top-volume items). One scan fetches all three; mode buttons switch instantly without re-fetching.
+- Vosk offline speech recognition support — fallback voice model for use when Google Speech API is unavailable; downloads automatically on first use.
+- Google Speech API key field added to the setup screen for enabling voice input in the desktop app.
+- Screenshot capture IPC — the app can now capture a screenshot of itself before opening the feedback modal, so the submission shows what you were looking at.
+
+### Changed
+- Aurora image updated to new artwork (Aurora1.png); "cute/hot" variant toggle removed.
+- Aurora sidebar panel no longer shows the voice toggle slider — wake word arming is handled in the chat input bar only.
+- Options cog (settings menu) now appears on the login screen and character showcase header, replacing the standalone dark/light mode button in those locations.
+- Skill panel now uses the active character's ID correctly when fetching enriched skill data (was always using the first character in the list).
+- Fit Analyzer skill plan export now uses Roman numerals and strips control characters from skill names for correct EVE clipboard import.
+- Character switcher on the landing page wraps to multiple rows when many characters are linked, preventing off-screen overflow.
+- ElevenLabs "hot" voice variant removed; TTS always uses the configured voice ID.
+
+### Fixed
+- Voice input now correctly routes to the selected microphone device when a non-default mic is configured in Options.
+- Vosk wake word tooltip now shows download progress percentage while the model is loading.
+
+## [1.0.3] — 2026-06-13
+
+### Fixed
+- Roadmap panel now correctly shows previously completed items as done on fresh installs — the default roadmap seeded on first run now reflects current completion state.
+
 ## [1.0.2] — 2026-06-12
 
 ### Added

@@ -85,12 +85,13 @@ interface AnalysisResult {
 
 interface SavedFit { id: string; name: string; shipType: string; fitText: string; createdAt: string }
 
-function FitAnalyzer({ skills }: { skills: EveSkill[] }) {
+function FitAnalyzer({ skills, characterId }: { skills: EveSkill[]; characterId?: number }) {
   const [fitText, setFitText] = useState('')
   const [loading, setLoading] = useState(false)
   const [result, setResult] = useState<AnalysisResult | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [copied, setCopied] = useState(false)
+  const [copiedFit, setCopiedFit] = useState(false)
   const [showAll, setShowAll] = useState(false)
 
   const [savedFits, setSavedFits] = useState<SavedFit[]>([])
@@ -135,6 +136,7 @@ function FitAnalyzer({ skills }: { skills: EveSkill[] }) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           fitText: text,
+          characterId,
           skills: skills.map(s => ({ skillId: s.skillId, trainedLevel: s.trainedLevel, skillpointsInSkill: s.skillpointsInSkill })),
         }),
       })
@@ -202,9 +204,32 @@ function FitAnalyzer({ skills }: { skills: EveSkill[] }) {
     await runAnalysis(fitText)
   }
 
+  function writeClipboard(text: string) {
+    try {
+      const ta = document.createElement('textarea')
+      ta.value = text
+      ta.style.position = 'fixed'
+      ta.style.opacity = '0'
+      document.body.appendChild(ta)
+      ta.focus()
+      ta.select()
+      document.execCommand('copy')
+      document.body.removeChild(ta)
+    } catch {
+      navigator.clipboard.writeText(text).catch(() => {})
+    }
+  }
+
+  function copyFit() {
+    if (!fitText.trim()) return
+    writeClipboard(fitText)
+    setCopiedFit(true)
+    setTimeout(() => setCopiedFit(false), 2000)
+  }
+
   function copyPlan() {
     if (!result?.skillPlanText) return
-    navigator.clipboard.writeText(result.skillPlanText)
+    writeClipboard(result.skillPlanText)
     setCopied(true)
     setTimeout(() => setCopied(false), 2000)
   }
@@ -364,16 +389,14 @@ function FitAnalyzer({ skills }: { skills: EveSkill[] }) {
             ))}
           </div>
 
-          {/* Copy skill plan */}
-          {result.missingSkills.length > 0 && (
-            <button
-              className="eve-btn w-full text-xs py-1.5 flex items-center justify-center gap-2"
-              onClick={copyPlan}
-            >
-              {copied ? <Check size={11} className="text-eve-green" /> : <Copy size={11} />}
-              {copied ? 'COPIED!' : 'COPY SKILL PLAN'}
-            </button>
-          )}
+          {/* Copy skill plan / fit */}
+          <button
+            className="eve-btn w-full text-xs py-1.5 flex items-center justify-center gap-2"
+            onClick={result.missingSkills.length > 0 ? copyPlan : copyFit}
+          >
+            {(copied || copiedFit) ? <Check size={11} className="text-eve-green" /> : <Copy size={11} />}
+            {(copied || copiedFit) ? 'COPIED!' : result.missingSkills.length > 0 ? 'COPY SKILL PLAN' : 'COPY FIT'}
+          </button>
         </div>
       )}
     </div>
@@ -499,7 +522,7 @@ export default function SkillPanel({ skills, skillQueue, loading, onRefresh, cha
         </div>
 
         {/* Right — fit analyzer */}
-        <FitAnalyzer skills={skills} />
+        <FitAnalyzer skills={skills} characterId={characterId} />
       </div>
     </div>
   )

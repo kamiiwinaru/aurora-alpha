@@ -28,4 +28,5 @@ contextBridge.exposeInMainWorld('electronAPI', {
   },
   installUpdate: () => ipcRenderer.send('update:install'),
   launchApp: () => ipcRenderer.send('app:launch'),
+  captureScreenshot: () => ipcRenderer.invoke('window:captureScreenshot'),
 })

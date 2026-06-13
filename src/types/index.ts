@@ -243,4 +243,4 @@ export interface JaniceAppraisal {
   code?: string
 }
 
-export type ActivePanel = 'chat' | 'notifications' | 'skills' | 'industry' | 'assets' | 'market' | 'janice' | 'zkill' | 'intel' | 'roadmap' | 'map'
+export type ActivePanel = 'chat' | 'notifications' | 'skills' | 'industry' | 'assets' | 'market' | 'janice' | 'zkill' | 'intel' | 'roadmap' | 'map' | 'landing' | 'landing-login'

@@ -39,6 +39,7 @@ function ensureFixedKeys() {
     existing['EVE_CLIENT_ID']     !== EVE_CLIENT_ID ||
     existing['EVE_CLIENT_SECRET'] !== EVE_CLIENT_SECRET ||
     existing['JANICE_API_KEY']    !== 'G9KwKq3465588VPd6747t95Zh94q3W2E' ||
+    !existing['DISCORD_WEBHOOK_URL'] ||
     !existing['EVE_CALLBACK_URL']
   if (needsWrite) {
     writeEnvValues(existing)
@@ -80,6 +81,7 @@ function writeEnvValues(values: Record<string, string>) {
   merged['VITE_EVE_CALLBACK_URL'] = 'http://localhost:3001/api/eve/callback'
   merged['PORT']                  = '3001'
   merged['JANICE_API_KEY']        = 'G9KwKq3465588VPd6747t95Zh94q3W2E'
+  merged['DISCORD_WEBHOOK_URL']   = 'https://discord.com/api/webhooks/1382826988397105243/MqO4dxfFJVMcNzRQNNNimr1R7VbAMQNtanE1KRh1EEjhxd9gbMBRhQDwY9wqpkqblXpE'
 
   const content = Object.entries(merged)
     .map(([k, v]) => `${k}=${v}`)
@@ -154,6 +156,25 @@ function createWindow() {
     show: false,
   })
 
+  // Grant microphone access for Web Speech API and getUserMedia
+  mainWindow.webContents.session.setPermissionRequestHandler((_wc, permission, callback) => {
+    const allowed = ['media', 'microphone', 'audioCapture']
+    callback(allowed.includes(permission))
+  })
+
+  // Enable SharedArrayBuffer (required by vosk-browser WASM) by injecting
+  // COOP + COEP headers on every response in this window's session.
+  // credentialless COEP allows cross-origin images (EVE CDN) without CORP headers.
+  mainWindow.webContents.session.webRequest.onHeadersReceived((details, callback) => {
+    callback({
+      responseHeaders: {
+        ...details.responseHeaders,
+        'Cross-Origin-Opener-Policy': 'same-origin',
+        'Cross-Origin-Embedder-Policy': 'credentialless',
+      },
+    })
+  })
+
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
     shell.openExternal(url)
     return { action: 'deny' }
@@ -192,6 +213,7 @@ function createWindow() {
   })
 
   if (isDev) {
+    mainWindow.webContents.openDevTools({ mode: 'detach' })
     globalShortcut.register('F12', () => {
       mainWindow?.webContents.openDevTools({ mode: 'detach' })
     })
@@ -277,6 +299,11 @@ ipcMain.on('window:maximize', () => {
   mainWindow.setFullScreen(!mainWindow.isFullScreen())
 })
 ipcMain.on('window:close', () => mainWindow?.close())
+ipcMain.handle('window:captureScreenshot', async () => {
+  if (!mainWindow) return null
+  const image = await mainWindow.webContents.capturePage()
+  return image.toPNG().toString('base64')
+})
 ipcMain.handle('window:isMaximized', () => mainWindow?.isMaximized() ?? false)
 
 // ── Setup / env IPC ───────────────────────────────────────────────────────
@@ -331,6 +358,11 @@ app.on('second-instance', () => {
 app.whenReady().then(() => {
   ensureFixedKeys()
   loadEnv()
+  // Chromium's Web Speech API needs GOOGLE_API_KEY to function outside of Chrome.
+  // If the user has configured one, expose it under the name Chromium expects.
+  if (process.env.GOOGLE_SPEECH_API_KEY) {
+    process.env.GOOGLE_API_KEY = process.env.GOOGLE_SPEECH_API_KEY
+  }
   startExpressServer()
   setTimeout(createWindow, isDev ? 1500 : 2000)
   setTimeout(setupAutoUpdater, isDev ? 0 : 10000)  // check after app is settled

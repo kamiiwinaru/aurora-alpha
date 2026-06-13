@@ -1,12 +1,11 @@
 import { useState } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 
-import AURORA_IMG from '../assets/Aurora.png'
-import AURORA_HOT_IMG from '../assets/Aurora_hot.png'
+import AURORA_IMG from '../assets/Aurora1.png'
 import TodoList from './TodoList'
 import { useVoiceInput } from '../hooks/useVoiceInput'
 
-function AuroraImage({ variant }: { variant: 'cute' | 'hot' }) {
+function AuroraImage() {
   const [failed, setFailed] = useState(false)
   if (failed) {
     return (
@@ -21,9 +20,9 @@ function AuroraImage({ variant }: { variant: 'cute' | 'hot' }) {
   }
   return (
     <img
-      src={variant === 'hot' ? AURORA_HOT_IMG : AURORA_IMG}
+      src={AURORA_IMG}
       alt="Aurora"
-      className={`w-full h-full object-cover ${variant === 'hot' ? 'object-top' : 'object-center'}`}
+      className="w-full h-full object-cover object-top"
       onError={() => setFailed(true)}
     />
   )
@@ -35,10 +34,9 @@ interface AuroraProps {
   voiceEnabled: boolean
   autoListenTrigger: number
   onVoiceQuery: (text: string) => void
-  auroraVariant: 'cute' | 'hot'
 }
 
-export default function Aurora({ isSpeaking, characterName, voiceEnabled, autoListenTrigger, onVoiceQuery, auroraVariant }: AuroraProps) {
+export default function Aurora({ isSpeaking, characterName, voiceEnabled, autoListenTrigger, onVoiceQuery }: AuroraProps) {
   const voice = useVoiceInput({
     onSubmit: onVoiceQuery,
     voiceEnabled,
@@ -56,17 +54,6 @@ export default function Aurora({ isSpeaking, characterName, voiceEnabled, autoLi
     wakeArmed             ? '#ffd700' :
     '#3a4556'
 
-  const trackBg =
-    isListening           ? 'rgba(255,68,68,0.12)'  :
-    phase === 'activated' ? 'rgba(0,212,255,0.12)'  :
-    wakeArmed             ? 'rgba(255,215,0,0.10)'  :
-    'rgba(255,255,255,0.04)'
-
-  const trackBorder =
-    isListening           ? 'rgba(255,68,68,0.45)'  :
-    phase === 'activated' ? 'rgba(0,212,255,0.55)'  :
-    wakeArmed             ? 'rgba(255,215,0,0.40)'  :
-    'rgba(255,255,255,0.12)'
 
   const statusDotColor =
     isSpeaking            ? '#00d4ff' :
@@ -156,7 +143,7 @@ export default function Aurora({ isSpeaking, characterName, voiceEnabled, autoLi
           transition={{ duration: isSpeaking ? 0.8 : voiceActive ? 1.2 : 3, repeat: Infinity, ease: 'easeInOut' }}
         >
           <div className="w-full h-full relative overflow-hidden">
-            <AuroraImage variant={auroraVariant} />
+            <AuroraImage />
             <motion.div
               className="absolute inset-x-0 pointer-events-none"
               style={{ height: '30%', background: 'linear-gradient(180deg, transparent, rgba(0,212,255,0.07), transparent)' }}
@@ -198,31 +185,6 @@ export default function Aurora({ isSpeaking, characterName, voiceEnabled, autoLi
           />
           <span className="text-eve-muted text-xs tracking-widest">{statusLabel}</span>
 
-          {/* Voice toggle slider — only shown when speech recognition is available */}
-          {voice.isSupported && (
-            <button
-              onClick={voice.toggleWakeMode}
-              title={voiceActive ? 'Disarm voice listener' : 'Arm voice listener — say "Aurora"'}
-              className="relative flex items-center shrink-0 focus:outline-none ml-1"
-              style={{ width: 32, height: 16 }}
-            >
-              <motion.div
-                className="absolute inset-0 rounded-full"
-                animate={{ backgroundColor: trackBg, borderColor: trackBorder }}
-                transition={{ duration: 0.2 }}
-                style={{ border: '1px solid' }}
-              />
-              <motion.div
-                className="absolute top-[3px] w-[10px] h-[10px] rounded-full"
-                animate={{
-                  left: voiceActive ? 18 : 3,
-                  backgroundColor: knobColor,
-                  boxShadow: voiceActive ? `0 0 5px ${knobColor}` : 'none',
-                }}
-                transition={{ type: 'spring', stiffness: 500, damping: 32 }}
-              />
-            </button>
-          )}
         </div>
 
         {/* Interim transcript — slides in while listening */}

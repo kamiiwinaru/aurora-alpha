@@ -19,7 +19,6 @@ interface SidebarProps {
   voiceEnabled: boolean
   autoListenTrigger: number
   onVoiceQuery: (text: string) => void
-  auroraVariant: 'cute' | 'hot'
 }
 
 export default function Sidebar({
@@ -37,7 +36,6 @@ export default function Sidebar({
   voiceEnabled,
   autoListenTrigger,
   onVoiceQuery,
-  auroraVariant,
 }: SidebarProps) {
   const [collapsed, setCollapsed] = useState(false)
   const [hoveredId, setHoveredId] = useState<string | null>(null)
@@ -141,7 +139,6 @@ export default function Sidebar({
             voiceEnabled={voiceEnabled}
             autoListenTrigger={autoListenTrigger}
             onVoiceQuery={onVoiceQuery}
-            auroraVariant={auroraVariant}
           />
         </div>
       )}
