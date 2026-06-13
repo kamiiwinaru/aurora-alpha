@@ -17,3 +17,4 @@ public/preview-*.html
 Aurora.bat
 CLAUDE.md
 SETUP.md
+electron/secrets.ts

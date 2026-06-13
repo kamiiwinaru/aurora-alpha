@@ -1,4 +1,5 @@
 import { app, BrowserWindow, ipcMain, shell, Menu, globalShortcut, protocol } from 'electron'
+import { DISCORD_WEBHOOK_URL } from './secrets'
 import { autoUpdater } from 'electron-updater'
 import { join } from 'path'
 import { spawn, ChildProcess } from 'child_process'
@@ -39,7 +40,7 @@ function ensureFixedKeys() {
     existing['EVE_CLIENT_ID']     !== EVE_CLIENT_ID ||
     existing['EVE_CLIENT_SECRET'] !== EVE_CLIENT_SECRET ||
     existing['JANICE_API_KEY']    !== 'G9KwKq3465588VPd6747t95Zh94q3W2E' ||
-    !existing['DISCORD_WEBHOOK_URL'] ||
+    (DISCORD_WEBHOOK_URL && existing['DISCORD_WEBHOOK_URL'] !== DISCORD_WEBHOOK_URL) ||
     !existing['EVE_CALLBACK_URL']
   if (needsWrite) {
     writeEnvValues(existing)
@@ -81,7 +82,7 @@ function writeEnvValues(values: Record<string, string>) {
   merged['VITE_EVE_CALLBACK_URL'] = 'http://localhost:3001/api/eve/callback'
   merged['PORT']                  = '3001'
   merged['JANICE_API_KEY']        = 'G9KwKq3465588VPd6747t95Zh94q3W2E'
-  merged['DISCORD_WEBHOOK_URL']   = 'https://discord.com/api/webhooks/1382826988397105243/MqO4dxfFJVMcNzRQNNNimr1R7VbAMQNtanE1KRh1EEjhxd9gbMBRhQDwY9wqpkqblXpE'
+  if (DISCORD_WEBHOOK_URL) merged['DISCORD_WEBHOOK_URL'] = DISCORD_WEBHOOK_URL
 
   const content = Object.entries(merged)
     .map(([k, v]) => `${k}=${v}`)
