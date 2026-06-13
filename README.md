@@ -8,28 +8,31 @@ Aurora is a personal AI assistant for EVE Online pilots, built as a standalone W
 ## Features
 
 - **AI Chat (COMMS)** — Conversational AI powered by Claude, with full awareness of your EVE character data
-- **Skills** — Live skill queue, training time, and skill planning discussion
+- **Skills** — Live skill queue, training time, skill planning, and fit analysis with skill plan export
 - **Industry** — Active job tracking, blueprint inventory, material analysis
 - **Assets** — Searchable asset list across all locations and containers
-- **Market** — Active buy/sell orders with price history charts
+- **Market** — Active buy/sell orders, price history charts, and Trade Agent scan (relist opportunities, mislisted items, high-volume picks)
 - **Appraisal** — Paste a cargo scan or item list for instant Janice appraisal
 - **zKillboard** — Inline killboard with ship renders and pilot portraits
-- **Intel** — Local intel log parsing with threat highlighting
-- **Voice** — Wake word activation, voice input, and ElevenLabs voice synthesis (optional)
+- **Intel** — Local intel log parsing with threat highlighting and auto-detected player location
+- **Star Map** — Interactive galaxy map with route planning, jump bridge support, and region/system search
+- **Voice** — Wake word activation ("Aurora"), voice input, and ElevenLabs voice synthesis (optional). Offline voice via Vosk also supported.
 - **Wallet** — Transaction and journal history across all characters
 - **Multi-character** — Add and switch between multiple EVE characters
+- **Feedback** — Submit bugs or suggestions with an optional screenshot directly from the app
 
 ---
 
 ## Installation
 
-1. Download **Aurora-Alpha-Setup-1.0.0.exe** from the [latest release](https://github.com/kamiiwinaru/aurora-alpha/releases/latest)
+1. Download **Aurora-Alpha-Setup-1.0.4.exe** from the [latest release](https://github.com/kamiiwinaru/aurora-alpha/releases/latest)
 2. Run the installer
 3. On first launch, enter your **Anthropic API key** ([get one here](https://console.anthropic.com))
 4. Log in with your EVE account via the EVE SSO button
 5. Start flying smarter
 
 > **ElevenLabs** API key is optional — only needed if you want Aurora to speak responses aloud.
+> **Google Speech API key** is optional — enables voice input in the desktop app. Without it, Vosk offline recognition is used as a fallback.
 
 ---
 
@@ -54,7 +57,6 @@ Aurora is a personal AI assistant for EVE Online pilots, built as a standalone W
 | F7 | zKillboard |
 | F8 | Intel |
 | F11 | Toggle fullscreen |
-| F12 | Developer tools |
 
 ---
 
@@ -71,6 +73,7 @@ Aurora checks for updates automatically on launch. When a new version is availab
 - [Anthropic Claude](https://www.anthropic.com/) (`claude-sonnet-4-6`)
 - [EVE ESI](https://esi.evetech.net/)
 - [ElevenLabs](https://elevenlabs.io/) (optional voice)
+- [Vosk](https://alphacephei.com/vosk/) (offline voice fallback)
 
 ---
 
