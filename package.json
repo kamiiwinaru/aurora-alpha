@@ -78,8 +78,7 @@
     "react-markdown": "^10.1.0",
     "react-router-dom": "^6.25.1",
     "recharts": "^3.8.1",
-    "remark-gfm": "^4.0.1",
-    "vosk-browser": "^0.0.8"
+    "remark-gfm": "^4.0.1"
   },
   "devDependencies": {
     "@types/cors": "^2.8.17",

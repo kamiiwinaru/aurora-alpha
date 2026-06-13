@@ -162,20 +162,7 @@ function createWindow() {
     callback(allowed.includes(permission))
   })
 
-  // Enable SharedArrayBuffer (required by vosk-browser WASM) by injecting
-  // COOP + COEP headers on every response in this window's session.
-  // credentialless COEP allows cross-origin images (EVE CDN) without CORP headers.
-  mainWindow.webContents.session.webRequest.onHeadersReceived((details, callback) => {
-    callback({
-      responseHeaders: {
-        ...details.responseHeaders,
-        'Cross-Origin-Opener-Policy': 'same-origin',
-        'Cross-Origin-Embedder-Policy': 'credentialless',
-      },
-    })
-  })
-
-  mainWindow.webContents.setWindowOpenHandler(({ url }) => {
+mainWindow.webContents.setWindowOpenHandler(({ url }) => {
     shell.openExternal(url)
     return { action: 'deny' }
   })

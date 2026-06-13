@@ -3644,30 +3644,6 @@ app.post('/api/tts', async (req, res) => {
   }
 })
 
-// Proxy the Vosk model download so the renderer avoids CORS and cross-origin issues
-const VOSK_MODEL_URL = 'https://alphacephei.com/vosk/models/vosk-model-small-en-us-0.15.tar.gz'
-app.get('/api/vosk-model', async (_req, res) => {
-  try {
-    const upstream = await fetch(VOSK_MODEL_URL)
-    if (!upstream.ok) { res.status(502).send('upstream fetch failed'); return }
-    const ct = upstream.headers.get('content-type') ?? 'application/gzip'
-    const cl = upstream.headers.get('content-length')
-    res.setHeader('Content-Type', ct)
-    res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin')
-    if (cl) res.setHeader('Content-Length', cl)
-    const reader = upstream.body!.getReader()
-    const pump = async () => {
-      const { done, value } = await reader.read()
-      if (done) { res.end(); return }
-      res.write(Buffer.from(value))
-      await pump()
-    }
-    await pump()
-  } catch (err) {
-    console.error('vosk-model proxy error:', err)
-    res.status(500).send('proxy error')
-  }
-})
 
 app.listen(PORT, () => {
   console.log(`Aurora server running on http://localhost:${PORT}`)
