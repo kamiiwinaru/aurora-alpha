@@ -25,7 +25,7 @@ Aurora is a personal AI assistant for EVE Online pilots, built as a standalone W
 
 ## Installation
 
-1. Download **Aurora-Alpha-Setup-1.0.5.exe** from the [latest release](https://github.com/kamiiwinaru/aurora-alpha/releases/latest)
+1. Download **Aurora-Alpha-Setup-1.0.6.exe** from the [latest release](https://github.com/kamiiwinaru/aurora-alpha/releases/latest)
 2. Run the installer
 3. On first launch, enter your **Anthropic API key** ([get one here](https://console.anthropic.com))
 4. Log in with your EVE account via the EVE SSO button

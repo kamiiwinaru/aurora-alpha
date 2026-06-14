@@ -1,5 +1,10 @@
 # Changelog
 
+## [1.0.6] — 2026-06-14
+
+### Changed
+- Version bump to force a clean GitHub release publish.
+
 ## [1.0.5] — 2026-06-14
 
 ### Added
