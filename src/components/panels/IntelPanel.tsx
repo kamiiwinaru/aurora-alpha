@@ -1,8 +1,11 @@
 import { useState, useRef, useCallback, useEffect } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { Radio, FolderOpen, RefreshCw, Filter, X, AlertTriangle, CheckCircle, Eye, Plus, Trash2, Bell, BellOff, MapPin, FolderSync } from 'lucide-react'
+import { Radio, FolderOpen, RefreshCw, Filter, X, AlertTriangle, CheckCircle, Eye, Plus, Trash2, Bell, BellOff, MapPin, FolderSync, ChevronDown, ChevronUp } from 'lucide-react'
 import type { EveShipLocation } from '../../types'
-import { SYSTEM_RE, buildSpans, renderMessage } from '../../lib/intel-highlight'
+import { SYSTEM_RE, renderMessage, buildSpans } from '../../lib/intel-highlight'
+import { EVE_SYSTEM_NAMES } from '../../lib/eve-system-names'
+import { EVE_SYSTEM_IDS } from '../../lib/eve-system-ids'
+import { EVE_SYSTEM_GRAPH } from '../../lib/eve-system-graph'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -24,7 +27,15 @@ interface ChannelState {
   autoRefresh: boolean
   error: string | null
   fileHandle?: FileSystemFileHandle | null
+  pos: { x: number; y: number }
+  size: { w: number; h: number }
+  zIndex: number
+  minimized: boolean
 }
+
+const MAX_CHANNELS = 10
+const WIN_W = 400
+const WIN_H = 300
 
 interface FileSystemFileHandle {
   kind: 'file'
@@ -32,16 +43,9 @@ interface FileSystemFileHandle {
   getFile(): Promise<File>
 }
 
-interface FileSystemDirectoryHandle {
-  values(): AsyncIterableIterator<FileSystemFileHandle | FileSystemDirectoryHandle>
-  name: string
-  kind: 'file' | 'directory'
-}
-
 declare global {
   interface Window {
     showOpenFilePicker?: (opts?: object) => Promise<FileSystemFileHandle[]>
-    showDirectoryPicker?: (opts?: object) => Promise<FileSystemDirectoryHandle>
   }
 }
 
@@ -102,66 +106,103 @@ function formatAge(ts: Date): string {
 
 // ─── Sound ────────────────────────────────────────────────────────────────────
 
-// Shared context — must be resumed after a user gesture or it stays suspended
 let _audioCtx: AudioContext | null = null
-function getCtx(): AudioContext {
-  if (!_audioCtx || _audioCtx.state === 'closed') _audioCtx = new AudioContext()
-  if (_audioCtx.state === 'suspended') _audioCtx.resume()
-  return _audioCtx
-}
 
-function playAlert(urgency: 'near' | 'mid') {
+interface AlertDetail { urgency: 'near' | 'mid'; system?: string; jumps?: number; count?: number; characters?: string[]; ships?: string[] }
+let _onAlertFired: ((d: AlertDetail) => void) | null = null
+
+async function playAlert(d: AlertDetail) {
+  _onAlertFired?.(d)
   try {
-    const ctx  = getCtx()
+    if (!_audioCtx || _audioCtx.state === 'closed') _audioCtx = new AudioContext()
+    // Fire-and-forget resume — awaiting it can hang indefinitely in Electron when
+    // the context auto-suspends due to inactivity (no user gesture available).
+    if (_audioCtx.state === 'suspended') _audioCtx.resume().catch(() => {})
+    const ctx  = _audioCtx
     const gain = ctx.createGain()
     gain.connect(ctx.destination)
-    const freqs = urgency === 'near' ? [880, 1100, 880] : [660, 880]
-    let t = ctx.currentTime
+    const freqs = d.urgency === 'near' ? [880, 1100, 880] : [660, 880]
+    // 80 ms head room — gives the resume() call time to lift suspension before
+    // the first note starts. 10 ms was too tight when context was resuming.
+    let t = ctx.currentTime + 0.08
     for (const freq of freqs) {
       const osc = ctx.createOscillator()
       osc.type = 'sine'
       osc.frequency.value = freq
       osc.connect(gain)
-      gain.gain.setValueAtTime(0.25, t)
-      gain.gain.exponentialRampToValueAtTime(0.001, t + 0.18)
+      gain.gain.setValueAtTime(0.3, t)
+      gain.gain.exponentialRampToValueAtTime(0.001, t + 0.2)
       osc.start(t)
-      osc.stop(t + 0.18)
-      t += 0.22
+      osc.stop(t + 0.2)
+      t += 0.25
     }
   } catch { /* blocked */ }
 }
 
-export function testAlert() { playAlert('near') }
+export function testAlert() { playAlert({ urgency: 'near' }) }
 
 // ─── ESI distance ─────────────────────────────────────────────────────────────
 
-const systemNameCache = new Map<string, number>()   // name → id
-const routeCache      = new Map<string, number>()   // `${a}-${b}` → jumps
+const systemNameCache   = new Map<string, number>()   // name → id
+const routeCache        = new Map<string, number>()   // `${a}-${b}` → jumps
+const recentAlertedSys  = new Map<string, number>()   // system → last alert timestamp
+const ALERT_COOLDOWN_MS = 45_000                      // 45s per-system dedup window
+const ALERT_MAX_AGE_MS  = 90_000                      // ignore entries older than 90s
 
-async function resolveSystemId(name: string): Promise<number | null> {
+function resolveSystemId(name: string): number | null {
   const upper = name.toUpperCase()
   if (systemNameCache.has(upper)) return systemNameCache.get(upper)!
-  try {
-    const res  = await fetch('https://esi.evetech.net/latest/search/?categories=solar_system&search=' + encodeURIComponent(name) + '&strict=true')
-    const data = await res.json() as { solar_system?: number[] }
-    const id   = data.solar_system?.[0] ?? null
-    if (id) systemNameCache.set(upper, id)
-    return id
-  } catch { return null }
+  const local = EVE_SYSTEM_IDS.get(name.toLowerCase())
+  if (local) { systemNameCache.set(upper, local); return local }
+  return null
 }
 
-async function jumpsBetween(originId: number, destId: number): Promise<number | null> {
+function jumpsBetween(originId: number, destId: number, maxJumps = 20): number | null {
   if (originId === destId) return 0
   const key = `${Math.min(originId, destId)}-${Math.max(originId, destId)}`
   if (routeCache.has(key)) return routeCache.get(key)!
-  try {
-    const res  = await fetch(`https://esi.evetech.net/latest/route/${originId}/${destId}/`)
-    if (!res.ok) return null
-    const route = await res.json() as number[]
-    const jumps = route.length - 1
-    routeCache.set(key, jumps)
-    return jumps
-  } catch { return null }
+  // BFS using local connection graph — no ESI calls
+  const visited = new Set<number>([originId])
+  let frontier = [originId]
+  for (let d = 1; d <= maxJumps; d++) {
+    const next: number[] = []
+    for (const sys of frontier) {
+      for (const neighbor of EVE_SYSTEM_GRAPH.get(sys) ?? []) {
+        if (neighbor === destId) { routeCache.set(key, d); return d }
+        if (!visited.has(neighbor)) { visited.add(neighbor); next.push(neighbor) }
+      }
+    }
+    if (next.length === 0) break
+    frontier = next
+  }
+  routeCache.set(key, maxJumps + 1)
+  return maxJumps + 1
+}
+
+// Returns full path of system IDs from origin to dest, or null if unreachable within maxJumps
+export function findRoute(originId: number, destId: number, maxJumps = 20): number[] | null {
+  if (originId === destId) return [originId]
+  const prev = new Map<number, number>([[originId, -1]])
+  let frontier = [originId]
+  for (let d = 1; d <= maxJumps; d++) {
+    const next: number[] = []
+    for (const sys of frontier) {
+      for (const neighbor of EVE_SYSTEM_GRAPH.get(sys) ?? []) {
+        if (prev.has(neighbor)) continue
+        prev.set(neighbor, sys)
+        if (neighbor === destId) {
+          const path: number[] = []
+          let cur: number = destId
+          while (cur !== -1) { path.unshift(cur); cur = prev.get(cur)! }
+          return path
+        }
+        next.push(neighbor)
+      }
+    }
+    if (next.length === 0) break
+    frontier = next
+  }
+  return null
 }
 
 
@@ -174,14 +215,18 @@ function categoryStyle(cat: IntelEntry['category']) {
   }
 }
 
-function gridCols(count: number) {
-  if (count === 1) return 'grid-cols-1'
-  if (count === 2) return 'grid-cols-2'
-  return 'grid-cols-3'
+type RawEntry = { id: string; timestamp: string; character: string; message: string; category: string }
+type RawLogs  = { logs?: Array<{ channelName: string; entries: RawEntry[] }>; error?: string }
+
+function parseEntries(raw: RawEntry[]): IntelEntry[] {
+  return raw.map(e => ({ ...e, timestamp: new Date(e.timestamp), category: e.category as IntelEntry['category'] }))
 }
 
 let nextId = 1
-function makeChannel(): ChannelState {
+// Step matches title bar height so each window's bar is visible beneath the one above
+const CASCADE_STEP = 30
+
+function makeChannel(index = 0): ChannelState {
   return {
     id: String(nextId++),
     channelName: null,
@@ -191,30 +236,35 @@ function makeChannel(): ChannelState {
     lastLoaded: null,
     autoRefresh: false,
     error: null,
+    pos: { x: index * CASCADE_STEP, y: index * CASCADE_STEP },
+    size: { w: WIN_W, h: WIN_H },
+    zIndex: index,
+    minimized: false,
   }
 }
 
-// ─── ChannelCard ──────────────────────────────────────────────────────────────
+// ─── ChannelWindow ────────────────────────────────────────────────────────────
 
-function ChannelCard({
+function ChannelWindow({
   channel,
   onUpdate,
   onRemove,
-  canRemove,
   originSystemId,
   alertThreshold,
   alertsEnabled,
   onZkillLookup,
+  onFocus,
 }: {
   channel: ChannelState
   onUpdate: (patch: Partial<ChannelState>) => void
   onRemove: () => void
-  canRemove: boolean
   originSystemId: number | null
   alertThreshold: number
   alertsEnabled: boolean
   onZkillLookup?: (query: string, category: 'character' | 'system') => void
+  onFocus: () => void
 }) {
+
   const fileHandleRef  = useRef<FileSystemFileHandle | null>(null)
   const fileInputRef   = useRef<HTMLInputElement>(null)
   const intervalRef    = useRef<ReturnType<typeof setInterval> | null>(null)
@@ -248,24 +298,49 @@ function ChannelCard({
       for (const e of entries) knownIds.current.add(e.id)
       return
     }
-    if (!alertsEnabledRef.current || !originSystemIdRef.current) return
+    if (!alertsEnabledRef.current) return
     const newEntries = entries.filter(e => !knownIds.current.has(e.id))
     for (const e of entries) knownIds.current.add(e.id)
 
     for (const entry of newEntries) {
       if (alertedIds.current.has(entry.id)) continue
-      if (entry.category !== 'hostile' && entry.category !== 'neutral') continue
+      if (Date.now() - entry.timestamp.getTime() > ALERT_MAX_AGE_MS) continue
 
+      const systemsInMsg = new Set<string>()
       SYSTEM_RE.lastIndex = 0
-      const sysMatches = [...entry.message.matchAll(SYSTEM_RE)]
-      for (const m of sysMatches) {
-        const destId = await resolveSystemId(m[1])
+      for (const m of entry.message.matchAll(SYSTEM_RE)) systemsInMsg.add(m[1])
+      for (const word of entry.message.split(/\W+/)) {
+        if (word.length >= 3 && EVE_SYSTEM_NAMES.has(word.toLowerCase())) systemsInMsg.add(word)
+      }
+      if (systemsInMsg.size === 0) continue
+
+      const extraCount = (entry.message.match(/\+(\d+)/) ?? [])[1]
+      const count = extraCount ? parseInt(extraCount, 10) : undefined
+      const spans = buildSpans(entry.message)
+      const characters = [...new Set(spans.filter(s => s.type === 'character').map(s => s.value))]
+      const ships = [...new Set(spans.filter(s => s.type === 'ship').map(s => s.value))]
+
+      if (!originSystemIdRef.current) {
+        const sys = [...systemsInMsg][0]
+        const now = Date.now()
+        if (sys && (now - (recentAlertedSys.get(sys.toLowerCase()) ?? 0)) < ALERT_COOLDOWN_MS) continue
+        if (sys) recentAlertedSys.set(sys.toLowerCase(), now)
+        alertedIds.current.add(entry.id)
+        await playAlert({ urgency: 'mid', system: sys, count, characters, ships })
+        continue
+      }
+
+      for (const sysName of systemsInMsg) {
+        const destId = resolveSystemId(sysName)
         if (!destId) continue
-        const jumps = await jumpsBetween(originSystemIdRef.current, destId)
+        const jumps = jumpsBetween(originSystemIdRef.current, destId)
         if (jumps === null) continue
         if (jumps <= alertThresholdRef.current) {
+          const now = Date.now()
+          if ((now - (recentAlertedSys.get(sysName.toLowerCase()) ?? 0)) < ALERT_COOLDOWN_MS) break
+          recentAlertedSys.set(sysName.toLowerCase(), now)
           alertedIds.current.add(entry.id)
-          playAlert(jumps <= 2 ? 'near' : 'mid')
+          await playAlert({ urgency: jumps <= 2 ? 'near' : 'mid', system: sysName, jumps, count, characters, ships })
           break
         }
       }
@@ -341,11 +416,19 @@ function ChannelCard({
   const clearCount   = channel.entries.filter(e => e.category === 'clear').length
 
   return (
-    <div className="flex flex-col min-h-0 border border-eve-border bg-eve-panel overflow-hidden">
-      {/* Card header */}
-      <div className="flex items-center justify-between px-2 py-1.5 border-b border-eve-border bg-eve-panel shrink-0">
+    <motion.div
+      initial={{ opacity: 0, scale: 0.96 }}
+      animate={{ opacity: 1, scale: 1 }}
+      transition={{ duration: 0.12 }}
+      className={`flex flex-col border border-eve-border bg-eve-panel overflow-hidden shadow-lg ${channel.minimized ? '' : 'h-[280px]'}`}
+    >
+      {/* Title bar */}
+      <div
+        onClick={onFocus}
+        className="flex items-center justify-between px-2 py-1.5 border-b border-eve-border bg-eve-deep shrink-0 select-none cursor-pointer"
+      >
         <div className="flex items-center gap-1.5 min-w-0">
-          <Radio size={10} className="text-eve-cyan shrink-0" />
+          <Radio size={9} className="text-eve-cyan shrink-0" />
           <span className="text-eve-cyan text-[10px] font-mono truncate">
             {channel.channelName ?? 'NO CHANNEL'}
           </span>
@@ -355,158 +438,151 @@ function ChannelCard({
               {' '}<span className="text-eve-green">{clearCount}C</span>
             </span>
           )}
-        </div>
-        <div className="flex items-center gap-1 shrink-0">
           {channel.autoRefresh && (
             <motion.div animate={{ rotate: 360 }} transition={{ duration: 2, repeat: Infinity, ease: 'linear' }}>
-              <RefreshCw size={9} className="text-eve-green" />
+              <RefreshCw size={8} className="text-eve-green shrink-0" />
             </motion.div>
           )}
-          {channel.channelName && fileHandleRef.current && (
-            <button
-              onClick={() => onUpdate({ autoRefresh: !channel.autoRefresh })}
-              className={`text-[9px] px-1.5 py-0.5 border font-mono transition-colors
-                ${channel.autoRefresh ? 'border-eve-green/50 text-eve-green' : 'border-eve-border text-eve-muted hover:text-eve-text'}`}
-            >
-              {channel.autoRefresh ? 'LIVE' : 'AUTO'}
-            </button>
-          )}
+        </div>
+        <div className="flex items-center gap-1 shrink-0">
           <button
             onClick={openPicker}
-            className="text-[9px] px-1.5 py-0.5 border border-eve-cyan/40 text-eve-cyan font-mono hover:bg-eve-cyan/10 transition-colors flex items-center gap-1"
+            className="text-[9px] px-1.5 py-0.5 border border-eve-cyan/30 text-eve-cyan/70 font-mono hover:bg-eve-cyan/10 transition-colors flex items-center gap-1"
           >
-            <FolderOpen size={9} />{channel.channelName ? 'SWAP' : 'LOAD'}
+            <FolderOpen size={8} />{channel.channelName ? 'SWAP' : 'LOAD'}
           </button>
-          {canRemove && (
-            <button
-              onClick={onRemove}
-              className="text-[9px] px-1 py-0.5 border border-eve-red/30 text-eve-red/60 hover:text-eve-red hover:border-eve-red/60 transition-colors"
-            >
-              <Trash2 size={9} />
-            </button>
-          )}
+          <button
+            onClick={() => onUpdate({ minimized: !channel.minimized })}
+            className="text-eve-dim hover:text-eve-text px-1 py-0.5 transition-colors"
+          >
+            {channel.minimized ? <ChevronUp size={10} /> : <ChevronDown size={10} />}
+          </button>
+          <button
+            onClick={onRemove}
+            className="text-eve-red/50 hover:text-eve-red px-1 py-0.5 transition-colors"
+          >
+            <X size={10} />
+          </button>
         </div>
       </div>
 
-      {/* Filter bar */}
-      {channel.channelName && (
-        <div className="flex gap-1 px-2 py-1 border-b border-eve-border/50 shrink-0">
-          <div className="relative flex-1">
-            <Filter size={8} className="absolute left-1.5 top-1/2 -translate-y-1/2 text-eve-dim" />
-            <input
-              className="eve-input w-full pl-5 py-0.5 text-[10px]"
-              placeholder="Filter..."
-              value={channel.filter}
-              onChange={e => onUpdate({ filter: e.target.value })}
-            />
-            {channel.filter && (
-              <button onClick={() => onUpdate({ filter: '' })} className="absolute right-1.5 top-1/2 -translate-y-1/2 text-eve-dim hover:text-eve-text">
-                <X size={8} />
-              </button>
-            )}
-          </div>
-          {(['all', 'hostile', 'clear'] as const).map(cat => (
-            <button
-              key={cat}
-              onClick={() => onUpdate({ categoryFilter: cat })}
-              className={`px-1.5 text-[9px] uppercase border font-mono transition-colors
-                ${channel.categoryFilter === cat
-                  ? cat === 'hostile' ? 'border-eve-red/60 bg-eve-red/10 text-eve-red'
-                    : cat === 'clear' ? 'border-eve-green/60 bg-eve-green/10 text-eve-green'
-                    : 'border-eve-cyan/40 bg-eve-cyan/10 text-eve-cyan'
-                  : 'border-eve-border text-eve-dim hover:text-eve-muted'}`}
-            >
-              {cat}
-            </button>
-          ))}
-        </div>
-      )}
-
-      <input ref={fileInputRef} type="file" accept=".txt" className="hidden" onChange={onFallbackFile} />
-
-      {/* Error */}
-      {channel.error && (
-        <div className="px-2 py-1 text-eve-red text-[10px] border-b border-eve-red/20 bg-eve-red/5 shrink-0">
-          {channel.error}
-        </div>
-      )}
-
-      {/* Feed */}
-      {channel.channelName && visible.length > 0 && (
+      {!channel.minimized && (
         <>
-          <div className="grid grid-cols-12 gap-1 px-2 py-1 border-b border-eve-border text-[8px] text-eve-dim uppercase tracking-widest shrink-0">
-            <span className="col-span-1">AGE</span>
-            <span className="col-span-3">PILOT</span>
-            <span className="col-span-7">MESSAGE</span>
-            <span className="col-span-1" />
-          </div>
-          <div className="flex-1 min-h-0 overflow-y-auto">
-            <AnimatePresence initial={false}>
-              {visible.map(en => {
-                const s = categoryStyle(en.category)
-                return (
-                  <motion.div
-                    key={en.id}
-                    initial={{ opacity: 0 }}
-                    animate={{ opacity: 1 }}
-                    className={`grid grid-cols-12 gap-1 px-2 py-1 border-b border-eve-border/20 border-l-2 ${s.border} ${s.bg} hover:bg-eve-border/10 transition-colors items-start`}
-                  >
-                    <div className="col-span-1 text-eve-dim text-[9px] font-mono">{formatAge(en.timestamp)}</div>
-                    <div className="col-span-3 text-[9px] truncate font-mono">
-                      {onZkillLookup ? (
-                        <button
-                          onClick={() => onZkillLookup(en.character, 'character')}
-                          className="text-eve-gold hover:underline hover:text-eve-gold/80 cursor-pointer truncate max-w-full text-left"
-                          title={`zkill: ${en.character}`}
-                        >
-                          {en.character}
-                        </button>
-                      ) : (
-                        <span className="text-eve-gold">{en.character}</span>
-                      )}
-                    </div>
-                    <div className="col-span-7 text-eve-text text-[9px] break-words leading-tight">{renderMessage(en.message, knownNames, onZkillLookup)}</div>
-                    <div className="col-span-1 flex justify-end pt-px">{s.icon}</div>
-                  </motion.div>
-                )
-              })}
-            </AnimatePresence>
-          </div>
-          {channel.lastLoaded && (
-            <div className="px-2 py-0.5 text-[8px] text-eve-dim border-t border-eve-border/30 shrink-0">
-              {channel.entries.length} entries · refreshed {formatAge(channel.lastLoaded)} ago
+          {/* Filter bar */}
+          {channel.channelName && (
+            <div className="flex gap-1 px-2 py-1 border-b border-eve-border/50 shrink-0">
+              <div className="relative flex-1">
+                <Filter size={8} className="absolute left-1.5 top-1/2 -translate-y-1/2 text-eve-dim" />
+                <input
+                  className="eve-input w-full pl-5 py-0.5 text-[10px]"
+                  placeholder="Filter..."
+                  value={channel.filter}
+                  onChange={e => onUpdate({ filter: e.target.value })}
+                />
+                {channel.filter && (
+                  <button onClick={() => onUpdate({ filter: '' })} className="absolute right-1.5 top-1/2 -translate-y-1/2 text-eve-dim hover:text-eve-text">
+                    <X size={8} />
+                  </button>
+                )}
+              </div>
+              {(['all', 'hostile', 'clear'] as const).map(cat => (
+                <button
+                  key={cat}
+                  onClick={() => onUpdate({ categoryFilter: cat })}
+                  className={`px-1.5 text-[9px] uppercase border font-mono transition-colors
+                    ${channel.categoryFilter === cat
+                      ? cat === 'hostile' ? 'border-eve-red/60 bg-eve-red/10 text-eve-red'
+                        : cat === 'clear' ? 'border-eve-green/60 bg-eve-green/10 text-eve-green'
+                        : 'border-eve-cyan/40 bg-eve-cyan/10 text-eve-cyan'
+                      : 'border-eve-border text-eve-dim hover:text-eve-muted'}`}
+                >
+                  {cat}
+                </button>
+              ))}
+            </div>
+          )}
+
+          <input ref={fileInputRef} type="file" accept=".txt" className="hidden" onChange={onFallbackFile} />
+
+          {/* Error */}
+          {channel.error && (
+            <div className="px-2 py-1 text-eve-red text-[10px] border-b border-eve-red/20 bg-eve-red/5 shrink-0">
+              {channel.error}
+            </div>
+          )}
+
+          {/* Feed */}
+          {channel.channelName && visible.length > 0 && (
+            <>
+              <div className="grid grid-cols-12 gap-1 px-2 py-1 border-b border-eve-border text-[8px] text-eve-dim uppercase tracking-widest shrink-0">
+                <span className="col-span-1">AGE</span>
+                <span className="col-span-3">PILOT</span>
+                <span className="col-span-7">MESSAGE</span>
+                <span className="col-span-1" />
+              </div>
+              <div className="flex-1 min-h-0 overflow-y-auto">
+                <AnimatePresence initial={false}>
+                  {visible.map(en => {
+                    const s = categoryStyle(en.category)
+                    return (
+                      <motion.div
+                        key={en.id}
+                        initial={{ opacity: 0 }}
+                        animate={{ opacity: 1 }}
+                        className={`grid grid-cols-12 gap-1 px-2 py-1 border-b border-eve-border/20 border-l-2 ${s.border} ${s.bg} hover:bg-eve-border/10 transition-colors items-start`}
+                      >
+                        <div className="col-span-1 text-eve-dim text-[9px] font-mono">{formatAge(en.timestamp)}</div>
+                        <div className="col-span-3 text-[9px] truncate font-mono">
+                          {onZkillLookup ? (
+                            <button
+                              onClick={() => onZkillLookup(en.character, 'character')}
+                              className="text-eve-gold hover:underline hover:text-eve-gold/80 cursor-pointer truncate max-w-full text-left"
+                              title={`zkill: ${en.character}`}
+                            >
+                              {en.character}
+                            </button>
+                          ) : (
+                            <span className="text-eve-gold">{en.character}</span>
+                          )}
+                        </div>
+                        <div className="col-span-7 text-eve-text text-[9px] break-words leading-tight">{renderMessage(en.message, knownNames, onZkillLookup)}</div>
+                        <div className="col-span-1 flex justify-end pt-px">{s.icon}</div>
+                      </motion.div>
+                    )
+                  })}
+                </AnimatePresence>
+              </div>
+              {channel.lastLoaded && (
+                <div className="px-2 py-0.5 text-[8px] text-eve-dim border-t border-eve-border/30 shrink-0">
+                  {channel.entries.length} entries · {formatAge(channel.lastLoaded)} ago
+                </div>
+              )}
+            </>
+          )}
+
+          {/* Empty — no file loaded */}
+          {!channel.channelName && !channel.error && (
+            <div className="flex-1 flex flex-col items-center justify-center gap-2 text-center p-4">
+              <Radio size={24} className="text-eve-cyan/20" />
+              <div className="text-eve-dim text-[10px]">No channel loaded</div>
+              <button onClick={openPicker} className="eve-btn-primary flex items-center gap-1.5 text-[10px] px-3 py-1.5">
+                <FolderOpen size={10} />LOAD LOG
+              </button>
+            </div>
+          )}
+
+          {/* Empty — filters hide everything */}
+          {channel.channelName && visible.length === 0 && !channel.error && (
+            <div className="flex-1 flex flex-col items-center justify-center gap-1">
+              <div className="text-eve-dim text-[10px]">No matching entries</div>
+              <button onClick={() => onUpdate({ filter: '', categoryFilter: 'all' })} className="text-[9px] text-eve-muted hover:text-eve-text underline">
+                clear filters
+              </button>
             </div>
           )}
         </>
       )}
-
-      {/* Empty — no file */}
-      {!channel.channelName && !channel.error && (
-        <div className="flex-1 flex flex-col items-center justify-center gap-2 text-center p-4">
-          <Radio size={24} className="text-eve-cyan/20" />
-          <div className="text-eve-dim text-[10px]">No channel loaded</div>
-          <button onClick={openPicker} className="eve-btn-primary flex items-center gap-1.5 text-[10px] px-3 py-1.5">
-            <FolderOpen size={10} />LOAD LOG
-          </button>
-          <div className="text-eve-dim text-[9px] max-w-[160px]">
-            Documents\EVE\logs\Chatlogs\
-          </div>
-        </div>
-      )}
-
-      {/* Empty — filter has no results */}
-      {channel.channelName && visible.length === 0 && !channel.error && (
-        <div className="flex-1 flex flex-col items-center justify-center gap-1">
-          <div className="text-eve-dim text-[10px]">No matching entries</div>
-          <button
-            onClick={() => onUpdate({ filter: '', categoryFilter: 'all' })}
-            className="text-[9px] text-eve-muted hover:text-eve-text underline"
-          >
-            clear filters
-          </button>
-        </div>
-      )}
-    </div>
+    </motion.div>
   )
 }
 
@@ -514,95 +590,224 @@ function ChannelCard({
 
 interface IntelPanelProps {
   shipLocation?: EveShipLocation | null
+  characterId?: number | null
+  characterName?: string | null
   onZkillLookup?: (query: string, category: 'character' | 'system') => void
 }
 
-export default function IntelPanel({ shipLocation, onZkillLookup }: IntelPanelProps) {
-  const [channels, setChannels]         = useState<ChannelState[]>([makeChannel()])
+const INTEL_MANUAL_SYSTEM_KEY = (id: number) => `aurora_intel_system_${id}`
+const INTEL_THRESHOLD_KEY     = (id: number) => `aurora_intel_threshold_${id}`
+
+export default function IntelPanel({ shipLocation, characterId, characterName, onZkillLookup }: IntelPanelProps) {
+  const [channels, setChannels]           = useState<ChannelState[]>([])
+  const [topZ, setTopZ]                   = useState(100)
   const [alertsEnabled, setAlertsEnabled] = useState(true)
-  const [alertThreshold, setAlertThreshold] = useState(5)
-  const [manualSystem, setManualSystem] = useState('')
-  const [autoLoadStatus, setAutoLoadStatus] = useState<string | null>(null)
+  const [alertThreshold, setAlertThreshold] = useState<number>(() => {
+    if (characterId) {
+      const saved = localStorage.getItem(INTEL_THRESHOLD_KEY(characterId))
+      if (saved) return Number(saved)
+    }
+    return 5
+  })
+  const [manualSystem, setManualSystem]   = useState<string>(() => {
+    if (characterId) return localStorage.getItem(INTEL_MANUAL_SYSTEM_KEY(characterId)) ?? ''
+    return ''
+  })
+  const [autoLoadStatus, setAutoLoadStatus] = useState<string | null>('Loading logs...')
+  const [alertFlash, setAlertFlash] = useState<'near' | 'mid' | null>(null)
+  const [debugPoll, setDebugPoll] = useState<{ n: number; chans: number; newE: number } | null>(null)
 
-  const originSystemId: number | null =
-    shipLocation?.solarSystemId ?? null
+  // Register the module-level alert notifier so playAlert() can update React state
+  useEffect(() => {
+    _onAlertFired = (d) => {
+      setAlertFlash(d.urgency)
+      setTimeout(() => setAlertFlash(null), 2000)
+      window.dispatchEvent(new CustomEvent('aurora_intel_alert', { detail: d }))
+    }
+    return () => { _onAlertFired = null }
+  }, [])
 
+  const originSystemId: number | null = shipLocation?.solarSystemId ?? null
   const originLabel = (shipLocation?.solarSystemName ?? manualSystem) || null
 
   const updateChannel = useCallback((id: string, patch: Partial<ChannelState>) => {
     setChannels(prev => prev.map(c => c.id === id ? { ...c, ...patch } : c))
   }, [])
-
-  const addChannel    = useCallback(() => { setChannels(prev => [...prev, makeChannel()]) }, [])
+  const addChannel    = useCallback(() => {
+    setChannels(prev => prev.length < MAX_CHANNELS ? [...prev, makeChannel(prev.length)] : prev)
+  }, [])
   const removeChannel = useCallback((id: string) => {
-    setChannels(prev => prev.length > 1 ? prev.filter(c => c.id !== id) : prev)
+    setChannels(prev => prev.filter(c => c.id !== id))
+  }, [])
+  const bringToFront  = useCallback((id: string) => {
+    setTopZ(z => {
+      const next = z + 1
+      setChannels(prev => prev.map(c => c.id === id ? { ...c, zIndex: next } : c))
+      return next
+    })
   }, [])
 
-  // Resolve manual system name to ID for alert checks
+  // Persist per-character preferences
+  useEffect(() => {
+    if (characterId) localStorage.setItem(INTEL_MANUAL_SYSTEM_KEY(characterId), manualSystem)
+  }, [characterId, manualSystem])
+  useEffect(() => {
+    if (characterId) localStorage.setItem(INTEL_THRESHOLD_KEY(characterId), String(alertThreshold))
+  }, [characterId, alertThreshold])
+
+  // Reset manual system when character switches
+  useEffect(() => {
+    if (!characterId) return
+    setManualSystem(localStorage.getItem(INTEL_MANUAL_SYSTEM_KEY(characterId)) ?? '')
+    setAlertThreshold(Number(localStorage.getItem(INTEL_THRESHOLD_KEY(characterId)) ?? '5'))
+  }, [characterId])
+
   const [manualSystemId, setManualSystemId] = useState<number | null>(null)
   useEffect(() => {
     if (shipLocation || !manualSystem.trim()) { setManualSystemId(null); return }
-    resolveSystemId(manualSystem.trim()).then(id => setManualSystemId(id))
+    setManualSystemId(resolveSystemId(manualSystem.trim()))
   }, [manualSystem, shipLocation])
 
   const effectiveOriginId = originSystemId ?? manualSystemId
 
-  const autoLoadFromDirectory = useCallback(async () => {
-    if (!window.showDirectoryPicker) {
-      setAutoLoadStatus('Directory picker not supported in this browser.')
-      return
-    }
-    try {
-      setAutoLoadStatus('Selecting folder...')
-      const dirHandle = await window.showDirectoryPicker({ mode: 'read' })
+  // ── Refs so server-poll callbacks stay stable ──────────────────────────
+  const channelsRef          = useRef<ChannelState[]>(channels)
+  const alertsEnabledRef     = useRef(alertsEnabled)
+  const alertThresholdRef    = useRef(alertThreshold)
+  const effectiveOriginIdRef = useRef<number | null>(effectiveOriginId)
+  const characterNameRef     = useRef<string | null | undefined>(characterName)
+  const topZRef              = useRef(100)
+  useEffect(() => { channelsRef.current          = channels          }, [channels])
+  useEffect(() => { alertsEnabledRef.current     = alertsEnabled     }, [alertsEnabled])
+  useEffect(() => { alertThresholdRef.current    = alertThreshold    }, [alertThreshold])
+  useEffect(() => { effectiveOriginIdRef.current = effectiveOriginId }, [effectiveOriginId])
+  useEffect(() => { characterNameRef.current     = characterName     }, [characterName])
+  useEffect(() => { topZRef.current              = topZ              }, [topZ])
 
-      // Collect all .txt file handles with their last-modified times
-      const fileEntries: Array<{ handle: FileSystemFileHandle; lastModified: number; name: string }> = []
-      for await (const entry of dirHandle.values()) {
-        if (entry.kind === 'file') {
-          const fh = entry as FileSystemFileHandle
-          const file = await fh.getFile()
-          if (file.name.endsWith('.txt')) {
-            fileEntries.push({ handle: fh, lastModified: file.lastModified, name: file.name })
+  const debugPollCountRef   = useRef(0)
+  const setDebugPollRef     = useRef(setDebugPoll)
+
+  // seenIds baseline: entries present on first load never trigger alerts
+  const seenIdsRef       = useRef<Set<string>>(new Set())
+  const alertBaselineSet = useRef(false)
+
+  // ── Stable server refresh — called on mount, on RELOAD, and by the interval
+  const refreshFromServer = useCallback(async (isInitial = false) => {
+    try {
+      const name       = characterNameRef.current
+      const openNames  = channelsRef.current.map(c => c.channelName).filter(Boolean) as string[]
+      const watchParam = openNames.length ? `&watch=${encodeURIComponent(openNames.join(','))}` : ''
+      const url        = name
+        ? `/api/intel-auto?listener=${encodeURIComponent(name)}${watchParam}`
+        : `/api/intel-auto${watchParam ? '?' + watchParam.slice(1) : ''}`
+      const res  = await fetch(url)
+      const data = await res.json() as RawLogs
+      if (!data.logs?.length) return
+
+      const now = new Date()
+      // Merge by channel name — preserves filter/settings, adds new windows for new channels
+      const current = [...channelsRef.current]
+      const byName  = new Map(current.map((c, i) => [c.channelName?.toLowerCase(), i]))
+
+      const newEntries: IntelEntry[] = []
+      for (const log of data.logs) {
+        const key     = log.channelName?.toLowerCase()
+        const entries = parseEntries(log.entries)
+        const isNewChannel = !byName.has(key)
+
+        // New channels (including ones that appear after character name loads) always
+        // baseline their entries — never alert on first appearance of a channel.
+        const channelNewEntries = alertBaselineSet.current && !isNewChannel
+          ? entries.filter(e => !seenIdsRef.current.has(e.id))
+          : []
+        channelNewEntries.forEach(e => newEntries.push(e))
+        entries.forEach(e => seenIdsRef.current.add(e.id))
+
+        const hasNew = channelNewEntries.length > 0
+
+        if (!isNewChannel) {
+          const idx = byName.get(key)!
+          const newZ = hasNew ? ++topZRef.current : current[idx].zIndex
+          current[idx] = { ...current[idx], channelName: log.channelName, entries, lastLoaded: now, zIndex: newZ }
+        } else if (current.length < MAX_CHANNELS) {
+          // Auto-open new window for a channel we haven't seen before
+          current.push({ ...makeChannel(current.length), channelName: log.channelName, entries, lastLoaded: now, autoRefresh: true })
+          byName.set(key, current.length - 1)
+        }
+      }
+      // Keep React topZ state in sync after any bumps
+      setTopZ(topZRef.current)
+
+      if (!alertBaselineSet.current) {
+        alertBaselineSet.current = true
+      } else if (newEntries.length && alertsEnabledRef.current) {
+        for (const entry of newEntries) {
+          if (Date.now() - entry.timestamp.getTime() > ALERT_MAX_AGE_MS) continue
+          const systemsInMsg = new Set<string>()
+          SYSTEM_RE.lastIndex = 0
+          for (const m of entry.message.matchAll(SYSTEM_RE)) systemsInMsg.add(m[1])
+          for (const word of entry.message.split(/\W+/)) {
+            if (word.length >= 3 && EVE_SYSTEM_NAMES.has(word.toLowerCase())) systemsInMsg.add(word)
+          }
+          if (systemsInMsg.size === 0) continue
+
+          const extraCount = (entry.message.match(/\+(\d+)/) ?? [])[1]
+          const count = extraCount ? parseInt(extraCount, 10) : undefined
+          const spans = buildSpans(entry.message)
+          const characters = [...new Set(spans.filter(s => s.type === 'character').map(s => s.value))]
+          const ships = [...new Set(spans.filter(s => s.type === 'ship').map(s => s.value))]
+
+          if (!effectiveOriginIdRef.current) {
+            const sys = [...systemsInMsg][0]
+            const now = Date.now()
+            if (sys && (now - (recentAlertedSys.get(sys.toLowerCase()) ?? 0)) < ALERT_COOLDOWN_MS) break
+            if (sys) recentAlertedSys.set(sys.toLowerCase(), now)
+            await playAlert({ urgency: 'mid', system: sys, count, characters, ships })
+            break
+          }
+
+          for (const sysName of systemsInMsg) {
+            const destId = resolveSystemId(sysName)
+            if (!destId) continue
+            const jumps  = jumpsBetween(effectiveOriginIdRef.current, destId)
+            if (jumps !== null && jumps <= alertThresholdRef.current) {
+              const now = Date.now()
+              if ((now - (recentAlertedSys.get(sysName.toLowerCase()) ?? 0)) < ALERT_COOLDOWN_MS) break
+              recentAlertedSys.set(sysName.toLowerCase(), now)
+              await playAlert({ urgency: jumps <= 2 ? 'near' : 'mid', system: sysName, jumps, count, characters, ships })
+              break
+            }
           }
         }
       }
 
-      if (fileEntries.length === 0) {
-        setAutoLoadStatus('No .txt log files found in that folder.')
-        setTimeout(() => setAutoLoadStatus(null), 3000)
-        return
-      }
-
-      // Sort newest first, take up to 3
-      fileEntries.sort((a, b) => b.lastModified - a.lastModified)
-      const top3 = fileEntries.slice(0, 3)
-
-      setAutoLoadStatus(`Loading ${top3.length} logs...`)
-
-      // Build fresh channel states for each file
-      const newChannels: ChannelState[] = await Promise.all(
-        top3.map(async ({ handle }) => {
-          const ch = makeChannel()
-          try {
-            const file = await handle.getFile()
-            const buf  = await file.arrayBuffer()
-            const text = decodeEveLog(buf)
-            const parsed = parseLogContent(text)
-            return { ...ch, channelName: parsed.channelName, entries: parsed.entries, lastLoaded: new Date(), autoRefresh: true, fileHandle: handle }
-          } catch {
-            return { ...ch, error: 'Failed to read file.' }
-          }
-        })
-      )
-
-      setChannels(newChannels)
-      setAutoLoadStatus(null)
+      debugPollCountRef.current++
+      setDebugPollRef.current({ n: debugPollCountRef.current, chans: current.length, newE: newEntries.length })
+      setChannels(current)
+      if (isInitial) setAutoLoadStatus(null)
     } catch {
-      // User cancelled or permission denied
-      setAutoLoadStatus(null)
+      if (isInitial) {
+        setAutoLoadStatus('Could not reach server.')
+        setTimeout(() => setAutoLoadStatus(null), 4000)
+      }
     }
-  }, [])
+  }, []) // stable — all volatile state read from refs
+
+  // Auto-load on mount, then poll every 5 s
+  useEffect(() => {
+    refreshFromServer(true)
+    const id = setInterval(() => refreshFromServer(false), 5000)
+    return () => clearInterval(id)
+  }, [refreshFromServer])
+
+  // Manual RELOAD: clear windows, reset baseline, re-fetch
+  const autoLoadFromServer = useCallback(async () => {
+    setAutoLoadStatus('Loading logs...')
+    setChannels([])
+    seenIdsRef.current = new Set()
+    alertBaselineSet.current = false
+    await refreshFromServer(true)
+  }, [refreshFromServer])
 
   return (
     <div className="flex-1 flex flex-col gap-2 min-h-0">
@@ -618,21 +823,19 @@ export default function IntelPanel({ shipLocation, onZkillLookup }: IntelPanelPr
           {autoLoadStatus && (
             <span className="text-eve-dim text-[9px] font-mono">{autoLoadStatus}</span>
           )}
-          {typeof window !== 'undefined' && window.showDirectoryPicker && (
-            <button
-              onClick={autoLoadFromDirectory}
-              className="eve-btn flex items-center gap-1.5 text-[10px] px-3 py-1.5"
-              title="Pick your EVE Chatlogs folder to auto-load the 3 most recent logs"
-            >
-              <FolderSync size={10} />AUTO-LOAD
-            </button>
-          )}
+          <button
+            onClick={autoLoadFromServer}
+            className="eve-btn flex items-center gap-1.5 text-[10px] px-3 py-1.5"
+            title="Reload the 3 most recent EVE chat logs"
+          >
+            <FolderSync size={10} />RELOAD
+          </button>
           <button
             onClick={addChannel}
-            disabled={channels.length >= 4}
+            disabled={channels.length >= MAX_CHANNELS}
             className="eve-btn-primary flex items-center gap-1.5 text-[10px] px-3 py-1.5 disabled:opacity-40"
           >
-            <Plus size={10} />ADD CHANNEL
+            <Plus size={10} />ADD WINDOW
           </button>
         </div>
       </div>
@@ -687,28 +890,62 @@ export default function IntelPanel({ shipLocation, onZkillLookup }: IntelPanelPr
           </button>
         )}
 
-        {originLabel && alertsEnabled && (
-          <span className="text-eve-dim text-[9px] shrink-0">
-            {manualSystemId || originSystemId ? '✓ TRACKING' : 'RESOLVING...'}
+        {alertsEnabled && (
+          <span className={`text-[9px] shrink-0 font-mono ${effectiveOriginId ? 'text-eve-green' : 'text-eve-gold'}`}>
+            {effectiveOriginId
+              ? '✓ TRACKING'
+              : originLabel
+                ? 'RESOLVING...'
+                : '⚠ NO ORIGIN — ALERTING ALL'}
           </span>
+        )}
+        {debugPoll && (
+          <span className="text-[8px] font-mono text-eve-dim shrink-0">
+            poll#{debugPoll.n} ch:{debugPoll.chans} new:{debugPoll.newE}
+          </span>
+        )}
+        {alertFlash && (
+          <motion.span
+            key={Date.now()}
+            initial={{ opacity: 1 }}
+            animate={{ opacity: 0 }}
+            transition={{ duration: 2 }}
+            className={`text-[9px] font-mono font-bold shrink-0 ${alertFlash === 'near' ? 'text-eve-red' : 'text-eve-gold'}`}
+          >
+            ▶ ALERT {alertFlash === 'near' ? 'NEAR' : 'MID'}
+          </motion.span>
         )}
       </div>
 
-      {/* Grid of channel cards */}
-      <div className={`flex-1 min-h-0 grid gap-2 ${gridCols(channels.length)}`}>
-        {channels.map(ch => (
-          <ChannelCard
-            key={ch.id}
-            channel={ch}
-            onUpdate={patch => updateChannel(ch.id, patch)}
-            onRemove={() => removeChannel(ch.id)}
-            canRemove={channels.length > 1}
-            originSystemId={effectiveOriginId}
-            alertThreshold={alertThreshold}
-            alertsEnabled={alertsEnabled}
-            onZkillLookup={onZkillLookup}
-          />
-        ))}
+      {/* Grid canvas — most recently active channel is sorted first */}
+      <div className="flex-1 min-h-0 overflow-y-auto">
+        {channels.length === 0 && !autoLoadStatus ? (
+          <div className="flex flex-col items-center justify-center h-full gap-2 text-eve-dim text-[10px]">
+            <Radio size={28} className="text-eve-cyan/15" />
+            No channels loaded — click RELOAD or ADD WINDOW
+          </div>
+        ) : (
+          <div
+            className="grid gap-2 p-2 items-start"
+            style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(340px, 1fr))' }}
+          >
+            <AnimatePresence>
+              {[...channels].sort((a, b) => b.zIndex - a.zIndex).map(ch => (
+                <ChannelWindow
+                  key={ch.id}
+                  channel={ch}
+                  onUpdate={patch => updateChannel(ch.id, patch)}
+                  onRemove={() => removeChannel(ch.id)}
+                  originSystemId={effectiveOriginId}
+                  alertThreshold={alertThreshold}
+                  alertsEnabled={alertsEnabled}
+                  onZkillLookup={onZkillLookup}
+                  onFocus={() => bringToFront(ch.id)}
+                />
+              ))}
+            </AnimatePresence>
+          </div>
+        )}
       </div>
     </div>
   )

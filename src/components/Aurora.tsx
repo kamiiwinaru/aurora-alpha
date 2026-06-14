@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
+import { Volume2, VolumeX } from 'lucide-react'
 
 import AURORA_IMG from '../assets/Aurora1.png'
 import TodoList from './TodoList'
@@ -32,11 +33,13 @@ interface AuroraProps {
   isSpeaking: boolean
   characterName?: string
   voiceEnabled: boolean
+  onToggleVoice?: () => void
+  showVoiceToggle?: boolean
   autoListenTrigger: number
   onVoiceQuery: (text: string) => void
 }
 
-export default function Aurora({ isSpeaking, characterName, voiceEnabled, autoListenTrigger, onVoiceQuery }: AuroraProps) {
+export default function Aurora({ isSpeaking, characterName, voiceEnabled, onToggleVoice, showVoiceToggle, autoListenTrigger, onVoiceQuery }: AuroraProps) {
   const voice = useVoiceInput({
     onSubmit: onVoiceQuery,
     voiceEnabled,
@@ -160,6 +163,24 @@ export default function Aurora({ isSpeaking, characterName, voiceEnabled, autoLi
           <div className="absolute bottom-0 left-0 w-4 h-4 border-b border-l border-eve-cyan/60" />
           <div className="absolute bottom-0 right-0 w-4 h-4 border-b border-r border-eve-cyan/60" />
         </div>
+
+        {/* Voice toggle — bottom-right of avatar, hidden on comms panel */}
+        {showVoiceToggle && onToggleVoice && (
+          <motion.button
+            onClick={onToggleVoice}
+            title={voiceEnabled ? 'Disable voice' : 'Enable voice'}
+            className="absolute bottom-1 right-1 z-30 w-7 h-7 flex items-center justify-center rounded-full border transition-colors"
+            style={{
+              borderColor: voiceEnabled ? 'rgba(0,212,255,0.6)' : 'rgba(26,35,50,0.9)',
+              background: voiceEnabled ? 'rgba(0,212,255,0.15)' : 'rgba(8,11,16,0.85)',
+              color: voiceEnabled ? '#00d4ff' : '#3a4556',
+            }}
+            whileHover={{ scale: 1.1 }}
+            whileTap={{ scale: 0.9 }}
+          >
+            {voiceEnabled ? <Volume2 size={13} /> : <VolumeX size={13} />}
+          </motion.button>
+        )}
 
         {/* Todo notepad */}
         <TodoList />

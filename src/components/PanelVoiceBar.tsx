@@ -5,9 +5,22 @@ interface PanelVoiceBarProps {
   onVoiceQuery: (text: string) => void
   voiceEnabled: boolean
   autoListenTrigger: number
+  noAIMode?: boolean
 }
 
-export default function PanelVoiceBar({ onVoiceQuery, voiceEnabled, autoListenTrigger }: PanelVoiceBarProps) {
+export default function PanelVoiceBar({ onVoiceQuery, voiceEnabled, autoListenTrigger, noAIMode }: PanelVoiceBarProps) {
+  if (noAIMode) {
+    return (
+      <div className="border-b border-eve-border/40 bg-eve-panel shrink-0 px-4 py-2 flex items-center gap-2 opacity-50 select-none">
+        <svg width="12" height="12" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.2" className="text-eve-muted shrink-0">
+          <circle cx="7" cy="7" r="6" /><line x1="7" y1="4" x2="7" y2="7" /><circle cx="7" cy="10" r="0.5" fill="currentColor" />
+        </svg>
+        <span className="text-eve-muted text-[9px] tracking-widest font-mono uppercase">
+          AI agent unavailable — Anthropic API key required
+        </span>
+      </div>
+    )
+  }
   const voice = useVoiceInput({
     onSubmit: onVoiceQuery,
     voiceEnabled,

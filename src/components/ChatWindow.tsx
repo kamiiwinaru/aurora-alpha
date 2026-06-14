@@ -10,6 +10,7 @@ interface ChatWindowProps {
   streaming: boolean
   toolStatus: string | null
   onEditMessage: (id: string, content: string) => void
+  noAIMode?: boolean
 }
 
 // Convert large M (million) ISK values to B (billion): 1,067.0M → 1.067B
@@ -206,7 +207,7 @@ function MessageBubble({
   )
 }
 
-export default function ChatWindow({ messages, streaming, toolStatus, onEditMessage }: ChatWindowProps) {
+export default function ChatWindow({ messages, streaming, toolStatus, onEditMessage, noAIMode }: ChatWindowProps) {
   const bottomRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
@@ -221,13 +222,22 @@ export default function ChatWindow({ messages, streaming, toolStatus, onEditMess
           animate={{ opacity: 1 }}
           className="flex flex-col items-center justify-center h-full gap-4 text-center py-16"
         >
-          <div className="text-eve-cyan/20 text-6xl font-mono">◈</div>
-          <div>
-            <div className="text-eve-cyan text-sm tracking-widest uppercase mb-1">AURORA ONLINE</div>
-            <div className="text-eve-muted text-xs max-w-xs leading-relaxed">
-              Capsuleer intelligence system active. Query regarding skills, industry, assets, or market operations.
+          <div className={`text-6xl font-mono ${noAIMode ? 'text-eve-muted/20' : 'text-eve-cyan/20'}`}>◈</div>
+          {noAIMode ? (
+            <div>
+              <div className="text-eve-muted text-sm tracking-widest uppercase mb-1">AI AGENT UNAVAILABLE</div>
+              <div className="text-eve-dim text-xs max-w-xs leading-relaxed">
+                Provide an Anthropic API key in Settings to enable AI chat and analysis features.
+              </div>
             </div>
-          </div>
+          ) : (
+            <div>
+              <div className="text-eve-cyan text-sm tracking-widest uppercase mb-1">AURORA ONLINE</div>
+              <div className="text-eve-muted text-xs max-w-xs leading-relaxed">
+                Capsuleer intelligence system active. Query regarding skills, industry, assets, or market operations.
+              </div>
+            </div>
+          )}
           <div className="text-eve-dim text-[10px] tracking-widest">
             ▸ EVE ONLINE · NEW EDEN · YC {new Date().getFullYear() - 1898}
           </div>

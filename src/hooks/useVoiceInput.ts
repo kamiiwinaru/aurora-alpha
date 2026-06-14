@@ -1,9 +1,10 @@
 import { useState, useRef, useCallback, useEffect } from 'react'
 import { loadVoskModel, prewarmAudio, VoskSession, type VoskStatus } from '../lib/voskRecognizer'
+import { PTT_KEY_STORAGE, PTT_KEY_DEFAULT, NOISE_FLOOR_KEY, NOISE_FLOOR_DEFAULT } from '../components/OptionsMenu'
 
-export type VoicePhase = 'off' | 'standby' | 'activated' | 'listening' | 'pending'
+export type VoicePhase = 'off' | 'standby' | 'activated' | 'listening' | 'pending' | 'transcribing'
 
-// Silence delay before auto-submit (ms)
+// Silence delay before auto-submit (ms) — used by Web Speech fallback path
 const SILENCE_DELAY = 2000
 
 
@@ -16,13 +17,13 @@ function getSpeechRecognition(): (new () => SpeechRecognition) | null {
   )
 }
 
-function stripWakeWord(text: string): string {
-  return text.replace(/^(aurora)[,\s]*/i, '').trim()
-}
+// function stripWakeWord(text: string): string {
+//   return text.replace(/^(aurora)[,\s]*/i, '').trim()
+// }
 
-function containsWakeWord(text: string): boolean {
-  return /\baurora\b/i.test(text)
-}
+// function containsWakeWord(text: string): boolean {
+//   return /\baurora\b/i.test(text)
+// }
 
 interface UseVoiceInputOptions {
   /** Called when the voice session produces a final query to send */
@@ -51,83 +52,30 @@ export function useVoiceInput({
   // Refs so closures inside recognition handlers always see current values
   const phaseRef = useRef<VoicePhase>('off')
   const valueRef = useRef('')
-  const wakeEnabledRef = useRef(false)
-  const wakeRef = useRef<SpeechRecognition | null>(null)
+  // const wakeEnabledRef = useRef(false)
+  // const wakeRef = useRef<SpeechRecognition | null>(null)
   const activeRef = useRef<SpeechRecognition | null>(null)
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null)
   const silenceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const countdownIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
-  const startWakeRef = useRef<() => void>(() => {})
+  // const startWakeRef = useRef<() => void>(() => {})
   const armSilenceTimerRef = useRef<() => void>(() => {})
 
   useEffect(() => { phaseRef.current = phase }, [phase])
   useEffect(() => { valueRef.current = value }, [value])
 
-  // ── Vosk (Electron only) ────────────────────────────────────────────────
-  const isElectron = !!window.electronAPI
-  const [voskStatus, setVoskStatus] = useState<VoskStatus>('idle')
-  const [voskDownloadPct, setVoskDownloadPct] = useState(0)
+  // ── Vosk (stubbed — Smart App Control blocks WASM in production) ─────────
+  const [voskStatus] = useState<VoskStatus>('idle')
+  const [voskDownloadPct] = useState(0)
   const voskSessionRef = useRef<VoskSession | null>(null)
-  const voskPartialRef = useRef('')
 
-  const ensureVoskReady = useCallback(async () => {
-    if (!isElectron || voskStatus === 'ready' || voskStatus === 'loading') return
-    setVoskStatus('loading')
-    try {
-      await loadVoskModel(pct => setVoskDownloadPct(pct))
-      setVoskStatus('ready')
-      prewarmAudio()
-    } catch (err) {
-      console.error('Vosk model load failed:', err)
-      setVoskStatus('error')
-    }
-  }, [isElectron, voskStatus])
-
-  // Pre-load the model immediately on Electron mount so it's ready when the user first speaks
-  useEffect(() => {
-    if (isElectron) ensureVoskReady()
-  }, []) // eslint-disable-line react-hooks/exhaustive-deps
+  // const ensureVoskReady = useCallback(async () => { ... }, [])
 
   const stopVosk = useCallback(() => {
     voskSessionRef.current?.stop()
     voskSessionRef.current = null
-    voskPartialRef.current = ''
     setInterimText('')
   }, [])
-
-  const startVosk = useCallback(async (prefill = '') => {
-    if (voskStatus !== 'ready') return
-    stopVosk()
-
-    if (prefill) {
-      setValue(prev => {
-        const base = prev.trimEnd()
-        return base ? `${base} ${prefill}` : prefill
-      })
-    }
-
-    setPhase('listening')
-    try {
-      const model = await loadVoskModel()
-      const session = await VoskSession.create(model, ({ text, partial }) => {
-        if (partial) {
-          voskPartialRef.current = text
-          setInterimText(text)
-        } else {
-          voskPartialRef.current = ''
-          setInterimText('')
-          setValue(prev => {
-            const base = prev.trimEnd()
-            return base ? `${base} ${text}` : text
-          })
-          armSilenceTimerRef.current()
-        }
-      })
-      voskSessionRef.current = session
-    } catch (err) {
-      console.error('Vosk session failed:', err)
-      setPhase(wakeEnabledRef.current ? 'standby' : 'off')
-    }
-  }, [voskStatus, stopVosk])
 
   // ── Silence / countdown timer ───────────────────────────────────────────
   const clearSilenceTimer = useCallback(() => {
@@ -144,14 +92,8 @@ export function useVoiceInput({
     if (msg) onSubmit(msg)
     setValue('')
     setInterimText('')
-    // Return to standby if wake mode is armed or returnToStandby is set
-    if (wakeEnabledRef.current || returnToStandby) {
-      setPhase('standby')
-      setTimeout(() => startWakeRef.current(), 200)
-    } else {
-      setPhase('off')
-    }
-  }, [onSubmit, clearSilenceTimer, returnToStandby])
+    setPhase('off')
+  }, [onSubmit, clearSilenceTimer])
 
   const armSilenceTimer = useCallback(() => {
     clearSilenceTimer()
@@ -171,21 +113,17 @@ export function useVoiceInput({
     }, SILENCE_DELAY)
   }, [clearSilenceTimer, submitVoiceInput])
 
-  // ── Active listening session ────────────────────────────────────────────
+  useEffect(() => { armSilenceTimerRef.current = armSilenceTimer }, [armSilenceTimer])
+
+  // ── Web Speech active listening (browser fallback, not used in Electron) ─
   const stopActive = useCallback(() => {
-    if (isElectron) {
-      stopVosk()
-      clearSilenceTimer()
-      return
-    }
     activeRef.current?.stop()
     activeRef.current = null
     clearSilenceTimer()
     setInterimText('')
-  }, [isElectron, stopVosk, clearSilenceTimer])
+  }, [clearSilenceTimer])
 
   const startActive = useCallback((prefill = '') => {
-    if (isElectron) { startVosk(prefill); return }
     if (!SpeechRecognitionClass) return
     stopActive()
 
@@ -196,12 +134,11 @@ export function useVoiceInput({
       })
     }
 
+    setPhase('listening')
     const rec = new SpeechRecognitionClass()
     rec.continuous = true
     rec.interimResults = true
     rec.lang = 'en-US'
-
-    rec.onstart = () => setPhase('listening')
 
     rec.onresult = (e: SpeechRecognitionEvent) => {
       let interim = ''
@@ -218,7 +155,7 @@ export function useVoiceInput({
           return base ? `${base} ${final.trim()}` : final.trim()
         })
         setInterimText('')
-        armSilenceTimer()
+        armSilenceTimerRef.current()
       }
     }
 
@@ -227,153 +164,224 @@ export function useVoiceInput({
       setInterimText('')
     }
 
-    rec.onerror = () => {
+    rec.onerror = (e: any) => {
+      console.error('[SpeechRecognition] error:', e.error, e.message)
       activeRef.current = null
       setInterimText('')
-      if (wakeEnabledRef.current) setPhase('standby')
-      else setPhase('off')
+      setPhase('off')
     }
 
     activeRef.current = rec
     rec.start()
-  }, [SpeechRecognitionClass, stopActive, armSilenceTimer])
+  }, [SpeechRecognitionClass, stopActive])
 
-  // ── Wake word listener ──────────────────────────────────────────────────
-  const stopWake = useCallback(() => {
-    if (wakeRef.current) {
-      wakeRef.current.abort()
-      wakeRef.current = null
+  // ── Wake word listener — COMMENTED OUT (parked until Vosk is unblocked) ──
+  // const stopWake = useCallback(() => {
+  //   if (wakeRef.current) { wakeRef.current.abort(); wakeRef.current = null }
+  // }, [])
+  //
+  // const startWake = useCallback(() => {
+  //   if (!SpeechRecognitionClass || !wakeEnabledRef.current || wakeRef.current) return
+  //   const rec = new SpeechRecognitionClass()
+  //   rec.continuous = false; rec.interimResults = true; rec.lang = 'en-US'; rec.maxAlternatives = 3
+  //   rec.onresult = (e: SpeechRecognitionEvent) => {
+  //     if (phaseRef.current !== 'standby') return
+  //     for (let i = e.resultIndex; i < e.results.length; i++) {
+  //       for (let alt = 0; alt < e.results[i].length; alt++) {
+  //         const transcript = e.results[i][alt].transcript
+  //         if (containsWakeWord(transcript)) {
+  //           const afterWake = stripWakeWord(transcript)
+  //           wakeRef.current = null; rec.abort()
+  //           setPhase('activated')
+  //           setTimeout(() => { if (wakeEnabledRef.current) startActive(afterWake) }, 50)
+  //           return
+  //         }
+  //       }
+  //     }
+  //   }
+  //   rec.onend = () => {
+  //     wakeRef.current = null
+  //     if (wakeEnabledRef.current && phaseRef.current === 'standby') setTimeout(() => startWakeRef.current(), 150)
+  //   }
+  //   rec.onerror = (e: any) => {
+  //     wakeRef.current = null
+  //     if (e.error === 'not-allowed') { wakeEnabledRef.current = false; setPhase('off'); return }
+  //     if (wakeEnabledRef.current && phaseRef.current === 'standby') setTimeout(() => startWakeRef.current(), 300)
+  //   }
+  //   wakeRef.current = rec
+  //   try { rec.start() } catch { wakeRef.current = null }
+  // }, [SpeechRecognitionClass, startActive])
+  //
+  // useEffect(() => { startWakeRef.current = startWake }, [startWake])
+  //
+  // // Start wake listener whenever phase enters standby
+  // useEffect(() => {
+  //   if (phase !== 'standby' || !wakeEnabledRef.current) return
+  //   startWake()
+  // }, [phase, startWake])
+  //
+  // const toggleWakeMode = useCallback(() => {
+  //   if (wakeEnabledRef.current) {
+  //     wakeEnabledRef.current = false; stopWake(); stopActive(); clearSilenceTimer()
+  //     setPhase('off'); setValue(''); setInterimText('')
+  //   } else {
+  //     wakeEnabledRef.current = true; setPhase('standby')
+  //   }
+  // }, [stopWake, stopActive, clearSilenceTimer])
+
+  // ── Noise filtering helpers ─────────────────────────────────────────────
+  const noiseFloorRef = useRef(Number(localStorage.getItem(NOISE_FLOOR_KEY) ?? NOISE_FLOOR_DEFAULT))
+  useEffect(() => {
+    function onChanged(e: Event) {
+      noiseFloorRef.current = (e as CustomEvent<number>).detail
+    }
+    window.addEventListener('aurora_noise_floor_changed', onChanged)
+    return () => window.removeEventListener('aurora_noise_floor_changed', onChanged)
+  }, [])
+  // Noise-only transcript patterns — single filler words, punctuation, brackets
+  const NOISE_TRANSCRIPT_RE = /^[\s.,!?;:()\[\]{}"'`~@#$%^&*_+=|\\/<>-]+$/
+  const NOISE_WORDS = new Set(['um', 'uh', 'hmm', 'hm', 'ah', 'oh', 'er', 'mm'])
+
+  function isNoiseTranscript(text: string): boolean {
+    const t = text.trim()
+    if (!t || t.length < 2) return true
+    if (NOISE_TRANSCRIPT_RE.test(t)) return true
+    if (NOISE_WORDS.has(t.toLowerCase())) return true
+    // Must contain at least one letter or digit
+    if (!/[a-zA-Z0-9]/.test(t)) return true
+    return false
+  }
+
+  // ── ElevenLabs Scribe push-to-talk ─────────────────────────────────────
+  const startScribeRecording = useCallback(async () => {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false })
+
+      // Monitor audio level during recording to detect silence/noise-only sessions
+      const audioCtx = new AudioContext()
+      const source = audioCtx.createMediaStreamSource(stream)
+      const analyser = audioCtx.createAnalyser()
+      analyser.fftSize = 256
+      source.connect(analyser)
+      const freqData = new Uint8Array(analyser.frequencyBinCount)
+      let peakLevel = 0
+      const levelTimer = setInterval(() => {
+        analyser.getByteFrequencyData(freqData)
+        const avg = freqData.reduce((a, b) => a + b, 0) / freqData.length
+        if (avg > peakLevel) peakLevel = avg
+      }, 50)
+
+      const recorder = new MediaRecorder(stream)
+      const chunks: Blob[] = []
+
+      recorder.ondataavailable = (e) => { if (e.data.size > 0) chunks.push(e.data) }
+      recorder.onstop = async () => {
+        clearInterval(levelTimer)
+        audioCtx.close()
+        stream.getTracks().forEach(t => t.stop())
+
+        // Skip Scribe entirely if audio never rose above noise floor
+        if (peakLevel < noiseFloorRef.current) {
+          setPhase('off')
+          return
+        }
+
+        setPhase('transcribing')
+        const blob = new Blob(chunks, { type: recorder.mimeType || 'audio/webm' })
+        try {
+          const resp = await fetch('/api/stt', {
+            method: 'POST',
+            headers: { 'Content-Type': blob.type },
+            body: blob,
+          })
+          const data = await resp.json() as { text?: string }
+          const transcript = data.text?.trim() ?? ''
+          if (!isNoiseTranscript(transcript)) setValue(transcript)
+        } catch (err) {
+          console.error('[Scribe] STT failed:', err)
+        }
+        setPhase('off')
+      }
+
+      recorder.start()
+      mediaRecorderRef.current = recorder
+      setPhase('listening')
+    } catch (err) {
+      console.error('[Scribe] getUserMedia failed:', err)
+      setPhase('off')
+    }
+  }, []) // eslint-disable-line react-hooks/exhaustive-deps
+
+  const stopScribeRecording = useCallback(() => {
+    if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording') {
+      mediaRecorderRef.current.stop()
+      mediaRecorderRef.current = null
     }
   }, [])
 
-  const startWake = useCallback(() => {
-    if (!SpeechRecognitionClass || !wakeEnabledRef.current || wakeRef.current) return
+  // ── PTT keyboard shortcut — configurable hold-to-talk ──────────────────
+  const pttKeyRef = useRef(localStorage.getItem(PTT_KEY_STORAGE) ?? PTT_KEY_DEFAULT)
 
-    const rec = new SpeechRecognitionClass()
-    rec.continuous = false
-    rec.interimResults = true
-    rec.lang = 'en-US'
-    rec.maxAlternatives = 3
+  useEffect(() => {
+    function onPttChanged(e: Event) {
+      pttKeyRef.current = (e as CustomEvent<string>).detail
+    }
+    window.addEventListener('aurora_ptt_changed', onPttChanged)
+    return () => window.removeEventListener('aurora_ptt_changed', onPttChanged)
+  }, [])
 
-    rec.onresult = (e: SpeechRecognitionEvent) => {
-      if (phaseRef.current !== 'standby') return
-      for (let i = e.resultIndex; i < e.results.length; i++) {
-        for (let alt = 0; alt < e.results[i].length; alt++) {
-          const transcript = e.results[i][alt].transcript
-          if (containsWakeWord(transcript)) {
-            const afterWake = stripWakeWord(transcript)
-            wakeRef.current = null
-            rec.abort()
-            setPhase('activated')
-            // 50 ms: practical floor for Chrome to release the audio context
-            // after abort() before a new session can start cleanly.
-            // Words in the same breath as "Aurora" are already in afterWake,
-            // so this gap only matters on a deliberate post-wake pause.
-            setTimeout(() => {
-              if (wakeEnabledRef.current) startActive(afterWake)
-            }, 50)
-            return
-          }
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key !== pttKeyRef.current || e.repeat) return
+      const tag = (document.activeElement as HTMLElement)?.tagName?.toLowerCase()
+      if (tag === 'input' || tag === 'textarea') return
+      if (phaseRef.current === 'off') startScribeRecording()
+    }
+    const onKeyUp = (e: KeyboardEvent) => {
+      if (e.key !== pttKeyRef.current) return
+      if (phaseRef.current === 'listening') {
+        if (mediaRecorderRef.current?.state === 'recording') {
+          mediaRecorderRef.current.stop()
+          mediaRecorderRef.current = null
         }
       }
     }
-
-    rec.onend = () => {
-      wakeRef.current = null
-      if (wakeEnabledRef.current && phaseRef.current === 'standby') {
-        setTimeout(() => startWakeRef.current(), 150)
-      }
+    document.addEventListener('keydown', onKeyDown)
+    document.addEventListener('keyup', onKeyUp)
+    return () => {
+      document.removeEventListener('keydown', onKeyDown)
+      document.removeEventListener('keyup', onKeyUp)
     }
+  }, [startScribeRecording])
 
-    rec.onerror = (e) => {
-      wakeRef.current = null
-      if (e.error === 'not-allowed') {
-        wakeEnabledRef.current = false
-        setPhase('off')
-        return
-      }
-      if (wakeEnabledRef.current && phaseRef.current === 'standby') {
-        setTimeout(() => startWakeRef.current(), 300)
-      }
-    }
-
-    wakeRef.current = rec
-    try { rec.start() } catch { wakeRef.current = null }
-  }, [SpeechRecognitionClass, startActive])
-
-  useEffect(() => { startWakeRef.current = startWake }, [startWake])
-  useEffect(() => { armSilenceTimerRef.current = armSilenceTimer }, [armSilenceTimer])
-
-  // Start wake listener whenever phase enters standby
-  // In Electron, Vosk handles wake detection via a continuous session
-  useEffect(() => {
-    if (phase !== 'standby' || !wakeEnabledRef.current) return
-    if (isElectron) {
-      if (voskStatus !== 'ready') return
-      // Run Vosk continuously in standby — look for wake word in partial results
-      let session: VoskSession | null = null
-      loadVoskModel().then(async model => {
-        if (phaseRef.current !== 'standby') return
-        session = await VoskSession.create(model, ({ text, partial }) => {
-          if (phaseRef.current !== 'standby') { session?.stop(); session = null; return }
-          const t = (text || '').toLowerCase()
-          if (containsWakeWord(t)) {
-            session?.stop()
-            session = null
-            const afterWake = stripWakeWord(t)
-            setPhase('activated')
-            setTimeout(() => {
-              if (wakeEnabledRef.current) startActive(afterWake)
-            }, 50)
-          } else if (!partial && t) {
-            // non-wake utterance — ignore but reset
-          }
-        })
-        voskSessionRef.current = session
-      }).catch(() => {})
-      return () => { session?.stop(); session = null }
-    }
-    startWake()
-  }, [phase, isElectron, voskStatus, startWake, startActive])
-
-  // ── Wake mode toggle ────────────────────────────────────────────────────
-  const toggleWakeMode = useCallback(() => {
-    if (wakeEnabledRef.current) {
-      wakeEnabledRef.current = false
-      stopWake()
+  // ── Manual mic toggle — Scribe push-to-talk ────────────────────────────
+  const toggleManualMic = useCallback(() => {
+    if (phase === 'listening') {
+      stopScribeRecording()
+      // onstop handler transitions to 'transcribing' then 'off'
+    } else if (phase === 'transcribing') {
+      // already uploading, ignore
+    } else if (phase === 'pending') {
       stopActive()
       clearSilenceTimer()
       setPhase('off')
-      setValue('')
-      setInterimText('')
     } else {
-      wakeEnabledRef.current = true
-      setPhase('standby')
-      // In Electron, kick off model download immediately so it's ready when needed
-      if (isElectron) ensureVoskReady()
+      startScribeRecording()
     }
-  }, [isElectron, ensureVoskReady, stopWake, stopActive, clearSilenceTimer])
+  }, [phase, stopScribeRecording, stopActive, clearSilenceTimer, startScribeRecording])
 
-  // ── Manual mic toggle ───────────────────────────────────────────────────
-  const toggleManualMic = useCallback(() => {
-    if (phase === 'listening' || phase === 'pending') {
-      stopActive()
-      clearSilenceTimer()
-      if (wakeEnabledRef.current) setPhase('standby')
-      else setPhase('off')
-    } else {
-      startActive()
-    }
-  }, [phase, stopActive, clearSilenceTimer, startActive])
+  // ── Global PTT via Electron IPC (fires when Aurora window is not focused) ─
+  const toggleManualMicRef = useRef(toggleManualMic)
+  useEffect(() => { toggleManualMicRef.current = toggleManualMic }, [toggleManualMic])
 
-  // ── Auto-listen when Aurora finishes speaking a question ────────────────
-  const autoListenInitRef = useRef(true)
   useEffect(() => {
-    if (autoListenInitRef.current) { autoListenInitRef.current = false; return }
-    if (!voiceEnabled || !SpeechRecognitionClass) return
-    if (phaseRef.current === 'listening' || phaseRef.current === 'pending') return
-    setTimeout(() => startActive(), 300)
-  }, [autoListenTrigger]) // eslint-disable-line react-hooks/exhaustive-deps
+    const api = (window as any).electronAPI
+    if (!api?.onPttToggle) return
+    const unsub = api.onPttToggle(() => toggleManualMicRef.current())
+    return unsub
+  }, [])
+
+  // Auto-listen removed — PTT is the input model; recording only on explicit trigger.
 
   // ── Submit on Enter / programmatic call ────────────────────────────────
   const submitNow = useCallback(() => {
@@ -384,17 +392,16 @@ export function useVoiceInput({
   // ── Cleanup ─────────────────────────────────────────────────────────────
   useEffect(() => {
     return () => {
-      wakeEnabledRef.current = false
-      stopWake()
       stopVosk()
       stopActive()
+      stopScribeRecording()
       clearSilenceTimer()
     }
-  }, [stopWake, stopVosk, stopActive, clearSilenceTimer])
+  }, [stopVosk, stopActive, stopScribeRecording, clearSilenceTimer])
 
-  const wakeArmed = phase === 'standby' || phase === 'activated'
-  const isListening = phase === 'listening' || phase === 'pending'
-  const isSupported = isElectron || !!SpeechRecognitionClass
+  const wakeArmed = false // wake word parked
+  const isListening = phase === 'listening' || phase === 'pending' || phase === 'transcribing'
+  const isSupported = true // MediaRecorder is universally available
 
   return {
     phase,
@@ -407,7 +414,7 @@ export function useVoiceInput({
     isSupported,
     voskStatus,
     voskDownloadPct,
-    toggleWakeMode,
+    toggleWakeMode: () => {}, // parked
     toggleManualMic,
     startActive,
     submitNow,

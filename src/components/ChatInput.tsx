@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
-import { Send, Square, Mic, Pencil, X, Radio, Volume2, VolumeX, Settings2 } from 'lucide-react'
+import { Send, Square, Mic, Pencil, X, Volume2, VolumeX, Settings2 } from 'lucide-react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { useVoiceInput } from '../hooks/useVoiceInput'
 
@@ -14,6 +14,7 @@ interface ChatInputProps {
   onToggleVoice: () => void
   onOpenVoiceSettings: () => void
   autoListenTrigger: number
+  noAIMode?: boolean
 }
 
 const SUGGESTIONS = [
@@ -34,9 +35,21 @@ export default function ChatInput({
   onToggleVoice,
   onOpenVoiceSettings,
   autoListenTrigger,
+  noAIMode,
 }: ChatInputProps) {
   const [textValue, setTextValue] = useState('')
+  const textValueRef = useRef('')
   const textareaRef = useRef<HTMLTextAreaElement>(null)
+  const autoSubmitTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  useEffect(() => { textValueRef.current = textValue }, [textValue])
+
+  const clearAutoSubmit = () => {
+    if (autoSubmitTimerRef.current) {
+      clearTimeout(autoSubmitTimerRef.current)
+      autoSubmitTimerRef.current = null
+    }
+  }
 
   // ── Voice input ───────────────────────────────────────────────────────────
   const handleVoiceSubmit = useCallback((text: string) => {
@@ -48,6 +61,26 @@ export default function ChatInput({
     voiceEnabled,
     autoListenTrigger,
   })
+
+  // When Scribe finishes, copy transcript into textarea and start 1s auto-send timer
+  useEffect(() => {
+    if (voice.value && voice.phase === 'off') {
+      const transcript = voice.value
+      setTextValue(prev => prev ? `${prev.trimEnd()} ${transcript}` : transcript)
+      voice.setValue('')
+      textareaRef.current?.focus()
+      clearAutoSubmit()
+      autoSubmitTimerRef.current = setTimeout(() => {
+        autoSubmitTimerRef.current = null
+        const msg = textValueRef.current.trim()
+        if (msg) {
+          setTextValue('')
+          if (textareaRef.current) textareaRef.current.style.height = 'auto'
+          onSend(msg)
+        }
+      }, 1000)
+    }
+  }, [voice.value, voice.phase]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // Sync edit value into the text area
   useEffect(() => {
@@ -88,6 +121,7 @@ export default function ChatInput({
       }
     }
     if (e.key === 'Escape') {
+      clearAutoSubmit()
       if (editValue !== null) { onCancelEdit(); setTextValue('') }
       if (voice.isListening) {
         voice.clearSilenceTimer()
@@ -97,24 +131,32 @@ export default function ChatInput({
   }
 
   // ── Derived display ───────────────────────────────────────────────────────
-  const { phase, interimText, countdown, wakeArmed, isListening, isSupported, voskStatus, voskDownloadPct } = voice
+  const { phase, interimText, countdown, isListening, isSupported } = voice
 
   const micColor =
-    phase === 'pending'   ? 'border-eve-gold text-eve-gold bg-eve-gold/10' :
-    phase === 'listening' ? 'border-eve-red text-eve-red bg-eve-red/10' :
-    phase === 'activated' ? 'border-eve-cyan text-eve-cyan bg-eve-cyan/10' :
+    phase === 'transcribing' ? 'border-eve-cyan text-eve-cyan bg-eve-cyan/10' :
+    phase === 'pending'      ? 'border-eve-gold text-eve-gold bg-eve-gold/10' :
+    phase === 'listening'    ? 'border-eve-red text-eve-red bg-eve-red/10' :
     'border-eve-dim text-eve-muted hover:border-eve-cyan hover:text-eve-cyan'
 
-  const wakeColor = wakeArmed
-    ? 'border-eve-cyan/60 text-eve-cyan bg-eve-cyan/10'
-    : 'border-eve-dim text-eve-muted hover:border-eve-cyan/40 hover:text-eve-cyan/60'
-
   const placeholder =
-    phase === 'pending'   ? `SUBMITTING IN ${countdown.toFixed(1)}s — SPEAK TO CONTINUE` :
-    phase === 'listening' ? 'LISTENING — PAUSE TO SUBMIT' :
-    phase === 'activated' ? 'AURORA ACTIVATED...' :
-    phase === 'standby'   ? 'LISTENING FOR "AURORA"...' :
+    phase === 'transcribing' ? 'TRANSCRIBING...' :
+    phase === 'pending'      ? `SUBMITTING IN ${countdown.toFixed(1)}s — SPEAK TO CONTINUE` :
+    phase === 'listening'    ? 'RECORDING — CLICK MIC TO STOP' :
     'ENTER QUERY // SHIFT+ENTER FOR NEWLINE'
+
+  if (noAIMode) {
+    return (
+      <div className="border-t border-eve-border bg-eve-panel px-4 py-4 flex items-center justify-center gap-3 opacity-50 select-none">
+        <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.2" className="text-eve-muted shrink-0">
+          <circle cx="7" cy="7" r="6" /><line x1="7" y1="4" x2="7" y2="7" /><circle cx="7" cy="10" r="0.5" fill="currentColor" />
+        </svg>
+        <span className="text-eve-muted text-xs tracking-widest uppercase">
+          AI agent unavailable — provide Anthropic API key in settings to enable
+        </span>
+      </div>
+    )
+  }
 
   return (
     <div className="border-t border-eve-border bg-eve-panel px-4 py-3">
@@ -132,21 +174,6 @@ export default function ChatInput({
             <button onClick={() => { onCancelEdit(); setTextValue('') }} className="ml-auto hover:text-eve-red transition-colors">
               <X size={10} />
             </button>
-          </motion.div>
-        )}
-      </AnimatePresence>
-
-      {/* Wake word activated flash */}
-      <AnimatePresence>
-        {phase === 'activated' && (
-          <motion.div
-            initial={{ opacity: 0, height: 0 }}
-            animate={{ opacity: 1, height: 'auto' }}
-            exit={{ opacity: 0, height: 0 }}
-            className="flex items-center gap-2 mb-2 text-[10px] text-eve-cyan border border-eve-cyan/30 bg-eve-cyan/5 px-2 py-1"
-          >
-            <motion.span animate={{ opacity: [1, 0.4, 1] }} transition={{ duration: 0.4, repeat: Infinity }}>◈</motion.span>
-            <span className="tracking-widest">AURORA ACTIVATED — SPEAK YOUR QUERY</span>
           </motion.div>
         )}
       </AnimatePresence>
@@ -191,32 +218,12 @@ export default function ChatInput({
       <div className="flex gap-2 items-end">
         {isSupported && (
           <div className="flex gap-1 shrink-0">
-            {/* Wake word arm/disarm */}
-            <motion.button
-              whileTap={{ scale: 0.95 }}
-              onClick={voice.toggleWakeMode}
-              disabled={streaming}
-              title={
-                voskStatus === 'loading' ? `Downloading voice model… ${voskDownloadPct}%` :
-                voskStatus === 'error'   ? 'Voice model failed to load — check console' :
-                wakeArmed ? 'Disarm wake word ("Aurora")' : 'Arm wake word — say "Aurora" to activate'
-              }
-              className={`px-2 py-2.5 border font-mono transition-all disabled:opacity-30 disabled:cursor-not-allowed ${wakeColor}`}
-            >
-              <motion.div
-                animate={wakeArmed ? { opacity: [1, 0.5, 1] } : { opacity: 1 }}
-                transition={{ duration: 1.5, repeat: wakeArmed ? Infinity : 0 }}
-              >
-                <Radio size={13} />
-              </motion.div>
-            </motion.button>
-
-            {/* Manual mic */}
+            {/* Manual mic — push-to-talk via ElevenLabs Scribe */}
             <motion.button
               whileTap={{ scale: 0.95 }}
               onClick={voice.toggleManualMic}
               disabled={streaming}
-              title={isListening ? 'Stop recording' : 'Voice input'}
+              title={isListening ? 'Stop & transcribe' : 'Voice input (or hold `)'}
               className={`px-2 py-2.5 border font-mono transition-all disabled:opacity-30 disabled:cursor-not-allowed ${micColor}`}
             >
               <motion.div
@@ -262,7 +269,7 @@ export default function ChatInput({
           <textarea
             ref={textareaRef}
             value={textValue}
-            onChange={e => setTextValue(e.target.value)}
+            onChange={e => { clearAutoSubmit(); setTextValue(e.target.value) }}
             onKeyDown={handleKey}
             disabled={disabled && !streaming}
             placeholder={placeholder}
@@ -319,16 +326,12 @@ export default function ChatInput({
       <div className="flex justify-between mt-1.5">
         <span className="text-eve-dim text-[9px] tracking-widest flex items-center gap-2">
           AURORA v1.0 // CLAUDE SONNET
-          {phase === 'standby' && (
-            <motion.span animate={{ opacity: [1, 0.4, 1] }} transition={{ duration: 2, repeat: Infinity }}
-              className="text-eve-cyan/60">◈ WAKE WORD ARMED</motion.span>
-          )}
-          {phase === 'activated' && (
-            <motion.span animate={{ opacity: [1, 0.3, 1] }} transition={{ duration: 0.4, repeat: Infinity }}
-              className="text-eve-cyan">◈ ACTIVATED</motion.span>
-          )}
           {phase === 'listening' && (
-            <span className="text-eve-red animate-pulse">● LISTENING</span>
+            <span className="text-eve-red animate-pulse">● RECORDING</span>
+          )}
+          {phase === 'transcribing' && (
+            <motion.span animate={{ opacity: [1, 0.4, 1] }} transition={{ duration: 0.6, repeat: Infinity }}
+              className="text-eve-cyan">◈ TRANSCRIBING</motion.span>
           )}
           {phase === 'pending' && (
             <span className="text-eve-gold">◷ SUBMITTING IN {countdown.toFixed(1)}s</span>

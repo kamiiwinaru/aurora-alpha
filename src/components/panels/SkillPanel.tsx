@@ -255,7 +255,7 @@ function FitAnalyzer({ skills, characterId }: { skills: EveSkill[]; characterId?
           <ChevronDown size={11} className="absolute right-2 top-1/2 -translate-y-1/2 text-eve-dim pointer-events-none" />
         </div>
         {dropdownOpen && (
-          <div className="absolute z-50 w-full mt-0.5 bg-black border border-eve-border max-h-48 overflow-y-auto">
+          <div className="absolute z-50 w-full mt-0.5 bg-eve-panel border border-eve-border max-h-48 overflow-y-auto">
             {filteredFits.length === 0 ? (
               <div className="px-2 py-2 text-eve-dim text-xs">No fits match</div>
             ) : filteredFits.map(fit => (

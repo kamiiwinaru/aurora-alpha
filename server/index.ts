@@ -2828,10 +2828,11 @@ app.get('/api/zkill/:category/:id', async (req, res) => {
   const limit = 25
 
   const zkillCatMap: Record<string, string> = {
-    character:    'characterID',
-    system:       'solarSystemID',
-    constellation:'constellationID',
-    region:       'regionID',
+    character:   'characterID',
+    corporation: 'corporationID',
+    alliance:    'allianceID',
+    system:      'solarSystemID',
+    region:      'regionID',
   }
   const zkillCat = zkillCatMap[category]
   if (!zkillCat) return res.status(400).json({ error: 'Unknown category' })
@@ -2839,13 +2840,12 @@ app.get('/api/zkill/:category/:id', async (req, res) => {
   try {
     let refs: ZkillRef[]
 
-    if (category === 'character') {
-      // Fetch both kills and losses in parallel so the feed shows the full picture
+    if (['character', 'corporation', 'alliance'].includes(category)) {
+      // Fetch both kills and losses in parallel so the feed shows the full activity picture
       const [killRefs, lossRefs] = await Promise.all([
         fetchZkillPage(`kills/${zkillCat}/${id}/page/${page}/`),
         fetchZkillPage(`losses/${zkillCat}/${id}/page/${page}/`),
       ])
-      // Merge and sort by killmail_id descending (newest first)
       const merged = [...killRefs, ...lossRefs]
       merged.sort((a, b) => b.killmail_id - a.killmail_id)
       refs = merged.slice(0, limit)
@@ -2992,8 +2992,10 @@ app.post('/api/eve/refresh', async (req, res) => {
 })
 
 // ── EVE Intel log reader ───────────────────────────────────────────────────
-const CHATLOG_DIR = process.env.EVE_CHATLOG_DIR ||
-  'C:\\Users\\kamii\\OneDrive\\Documents\\EVE\\logs\\Chatlogs'
+const CHATLOG_DIR = process.env.EVE_CHATLOG_DIR || (() => {
+  const username = process.env.USERNAME || process.env.USER || 'user'
+  return `C:\\Users\\${username}\\OneDrive\\Documents\\EVE\\logs\\Chatlogs`
+})()
 
 const HOSTILE_KW = ['neut','neutral','hostile','red','nv','nb','combat','fleet','gang','blob','cyno','bubbl','camp','gatecamp','tackle','pointed','warp disrupt']
 const CLEAR_KW   = ['clr','clear','safe','gone','left','docked','no one','empty','dock']
@@ -3009,49 +3011,133 @@ function categoriseMsg(msg: string): string {
 function parseEveLog(text: string) {
   const lines = text.split('\n').map(l => l.replace(/\r$/, ''))
   let channelName = 'Unknown Channel'
-  for (const line of lines.slice(0, 15)) {
-    const m = line.match(/Channel Name:\s+(.+)/)
-    if (m) { channelName = m[1].trim(); break }
+  let listener    = ''
+  for (const line of lines.slice(0, 20)) {
+    const cn = line.match(/Channel Name:\s+(.+)/)
+    if (cn) channelName = cn[1].trim()
+    const li = line.match(/Listener:\s+(.+)/)
+    if (li) listener = li[1].trim()
+    if (channelName !== 'Unknown Channel' && listener) break
   }
 
   const entries: Array<{ id: string; timestamp: string; character: string; message: string; category: string }> = []
   const re = /^\s*\[\s*(\d{4}\.\d{2}\.\d{2}\s+\d{2}:\d{2}:\d{2})\s*\]\s*([^>]+?)\s*>\s*(.+)$/
+  const idCount = new Map<string, number>()
   for (const line of lines) {
     const m = line.match(re)
     if (!m) continue
     const [, ts, character, message] = m
-    if (character.trim() === 'EVE System') continue
+    const char = character.trim()
+    if (char === 'EVE System') continue
+    const baseId = `${ts}-${char}`
+    const n = (idCount.get(baseId) ?? 0) + 1
+    idCount.set(baseId, n)
     entries.push({
-      id: `${ts}-${character.trim()}`,
+      id: n === 1 ? baseId : `${baseId}-${n}`,
       timestamp: ts.replace(/\./g, '-').replace(' ', 'T') + 'Z',
-      character: character.trim(),
+      character: char,
       message: message.trim(),
       category: categoriseMsg(message),
     })
   }
 
-  return { channelName, entries: entries.reverse() }
+  return { channelName, listener, entries: entries.reverse() }
 }
 
 app.get('/api/intel/:channel', (req, res) => {
-  const channel = req.params.channel.toLowerCase()
+  const channel  = req.params.channel.toLowerCase()
+  const listener = (req.query.listener as string | undefined)?.trim().toLowerCase()
   try {
-    const files = readdirSync(CHATLOG_DIR)
+    const allFiles = readdirSync(CHATLOG_DIR)
       .filter(f => f.toLowerCase().startsWith(channel) && f.endsWith('.txt'))
       .map(f => ({ name: f, mtime: statSync(join(CHATLOG_DIR, f)).mtimeMs }))
       .sort((a, b) => b.mtime - a.mtime)
 
-    if (!files.length) return res.json({ error: `No log file found for channel: ${channel}` })
+    if (!allFiles.length) return res.json({ error: `No log file found for channel: ${channel}` })
 
-    const filePath = join(CHATLOG_DIR, files[0].name)
-    const buf = readFileSync(filePath)
-    const text = buf.toString('utf16le').replace(/﻿/g, '')
+    // If listener provided, find the most recent file whose Listener header matches
+    let chosen = allFiles[0]
+    if (listener) {
+      for (const f of allFiles) {
+        try {
+          const text = readFileSync(join(CHATLOG_DIR, f.name)).toString('utf16le').replace(/﻿/g, '')
+          const m = text.match(/Listener:\s+(.+)/)
+          if (m && m[1].trim().toLowerCase() === listener) { chosen = f; break }
+        } catch { /* skip unreadable */ }
+      }
+    }
+
+    const buf    = readFileSync(join(CHATLOG_DIR, chosen.name))
+    const text   = buf.toString('utf16le').replace(/﻿/g, '')
     const parsed = parseEveLog(text)
 
-    res.json({ ...parsed, file: files[0].name, lastModified: new Date(files[0].mtime).toISOString() })
+    res.json({ ...parsed, file: chosen.name, lastModified: new Date(chosen.mtime).toISOString() })
   } catch (err) {
     console.error('Intel log error:', err)
     res.status(500).json({ error: err instanceof Error ? err.message : 'Failed to read log' })
+  }
+})
+
+// Return log files for the active character (Intel panel auto-load + watched channels)
+// ?listener=CharName  — filter by Listener header
+// ?watch=chan1,chan2   — channel names that must always be included regardless of recency
+app.get('/api/intel-auto', (req, res) => {
+  const listener   = (req.query.listener as string | undefined)?.trim().toLowerCase()
+  const watchParam = (req.query.watch as string | undefined) ?? ''
+  const watchNames = watchParam ? watchParam.split(',').map(s => s.trim().toLowerCase()).filter(Boolean) : []
+
+  // Helper: read and parse a single log file
+  function readLog(name: string, mtime: number) {
+    try {
+      const buf    = readFileSync(join(CHATLOG_DIR, name))
+      const text   = buf.toString('utf16le').replace(/﻿/g, '')
+      const parsed = parseEveLog(text)
+      return { file: name, lastModified: new Date(mtime).toISOString(), ...parsed }
+    } catch {
+      return { file: name, lastModified: new Date(mtime).toISOString(), channelName: name, listener: '', entries: [], error: 'Failed to parse' }
+    }
+  }
+
+  // Helper: does a file's Listener header match?
+  function matchesListener(name: string): boolean {
+    if (!listener) return true
+    try {
+      const text = readFileSync(join(CHATLOG_DIR, name)).toString('utf16le').replace(/﻿/g, '')
+      const m    = text.match(/Listener:\s+(.+)/)
+      return m ? m[1].trim().toLowerCase() === listener : false
+    } catch { return false }
+  }
+
+  try {
+    let files = readdirSync(CHATLOG_DIR)
+      .filter(f => f.endsWith('.txt'))
+      .map(f => ({ name: f, mtime: statSync(join(CHATLOG_DIR, f)).mtimeMs }))
+      .sort((a, b) => b.mtime - a.mtime)
+
+    if (listener) files = files.filter(({ name }) => matchesListener(name))
+
+    // Always include the 3 freshest logs (auto-discovery) + any watched channel files
+    const seen      = new Set<string>()
+    const selected: typeof files = []
+
+    // 1. Top-3 by recency
+    for (const f of files) {
+      if (selected.length >= 3) break
+      seen.add(f.name)
+      selected.push(f)
+    }
+
+    // 2. Watched channels — find the most recent file per channel name not already included
+    for (const watchName of watchNames) {
+      const match = files.find(f => !seen.has(f.name) && f.name.toLowerCase().startsWith(watchName))
+      if (match) { seen.add(match.name); selected.push(match) }
+    }
+
+    if (!selected.length) return res.json({ logs: [] })
+
+    res.json({ logs: selected.map(({ name, mtime }) => readLog(name, mtime)) })
+  } catch (err) {
+    res.status(500).json({ error: err instanceof Error ? err.message : 'Failed to read chatlog directory' })
   }
 })
 
@@ -3587,6 +3673,34 @@ app.post('/api/settings/voice', (req, res) => {
   if (apiKey)  process.env.ELEVENLABS_API_KEY  = apiKey
   if (voiceId) process.env.ELEVENLABS_VOICE_ID = voiceId
   res.json({ ok: true })
+})
+
+// ── ElevenLabs Scribe STT proxy ──────────────────────────────────────────
+app.post('/api/stt', express.raw({ type: '*/*', limit: '25mb' }), async (req, res) => {
+  const apiKey = process.env.ELEVENLABS_API_KEY
+  if (!apiKey) return res.status(503).json({ error: 'no_api_key' })
+
+  const mimeType = (req.headers['content-type'] ?? 'audio/webm').split(';')[0]
+  const form = new FormData()
+  form.append('model_id', 'scribe_v1')
+  form.append('file', new Blob([req.body as Buffer], { type: mimeType }), 'recording.webm')
+
+  try {
+    const resp = await fetch('https://api.elevenlabs.io/v1/speech-to-text', {
+      method: 'POST',
+      headers: { 'xi-api-key': apiKey },
+      body: form,
+    })
+    const data = await resp.json() as { text?: string; detail?: string }
+    if (!resp.ok) {
+      console.error('[Scribe] API error:', data)
+      return res.status(resp.status).json({ error: data.detail ?? 'scribe_error' })
+    }
+    res.json({ text: data.text ?? '' })
+  } catch (err) {
+    console.error('[Scribe] fetch failed:', err)
+    res.status(500).json({ error: 'fetch_failed' })
+  }
 })
 
 // ── ElevenLabs TTS proxy ──────────────────────────────────────────────────

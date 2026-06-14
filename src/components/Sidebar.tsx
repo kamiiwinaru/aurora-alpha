@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { Plus, Trash2, MessageSquare, ChevronRight, ListTodo } from 'lucide-react'
+import { Plus, Trash2, MessageSquare, ChevronRight, ListTodo, Eraser } from 'lucide-react'
 import Aurora from './Aurora'
 import type { Conversation } from '../types'
 
@@ -10,6 +10,7 @@ interface SidebarProps {
   onSelect: (id: string) => void
   onNew: () => void
   onDelete: (id: string) => void
+  onClearAll: () => void
   darkMode: boolean
   onToggleDark: () => void
   onOpenRoadmap: () => void
@@ -17,6 +18,8 @@ interface SidebarProps {
   isSpeaking: boolean
   characterName?: string
   voiceEnabled: boolean
+  onToggleVoice: () => void
+  showVoiceToggle?: boolean
   autoListenTrigger: number
   onVoiceQuery: (text: string) => void
 }
@@ -27,6 +30,7 @@ export default function Sidebar({
   onSelect,
   onNew,
   onDelete,
+  onClearAll,
   darkMode,
   onToggleDark,
   onOpenRoadmap,
@@ -34,6 +38,8 @@ export default function Sidebar({
   isSpeaking,
   characterName,
   voiceEnabled,
+  onToggleVoice,
+  showVoiceToggle,
   autoListenTrigger,
   onVoiceQuery,
 }: SidebarProps) {
@@ -71,14 +77,23 @@ export default function Sidebar({
       </div>
 
       {/* New chat button */}
-      <div className="px-2 py-2 border-b border-eve-border">
+      <div className="px-2 py-2 border-b border-eve-border flex gap-1">
         <button
           onClick={onNew}
-          className="w-full eve-btn-primary flex items-center gap-2 justify-center"
+          className="flex-1 eve-btn-primary flex items-center gap-2 justify-center"
         >
           <Plus size={12} />
           {!collapsed && <span>NEW SESSION</span>}
         </button>
+        {!collapsed && (
+          <button
+            onClick={onClearAll}
+            title="Clear all sessions"
+            className="eve-btn flex items-center justify-center px-2 text-eve-muted hover:text-eve-red hover:border-eve-red/40 transition-colors"
+          >
+            <Eraser size={12} />
+          </button>
+        )}
       </div>
 
       {/* Conversation list */}
@@ -137,6 +152,8 @@ export default function Sidebar({
             isSpeaking={isSpeaking}
             characterName={characterName}
             voiceEnabled={voiceEnabled}
+            onToggleVoice={onToggleVoice}
+            showVoiceToggle={showVoiceToggle}
             autoListenTrigger={autoListenTrigger}
             onVoiceQuery={onVoiceQuery}
           />

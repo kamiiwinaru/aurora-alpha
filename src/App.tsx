@@ -1,4 +1,6 @@
 import { useState, useEffect, useRef } from 'react'
+import { buildIntelReport } from './lib/intel-report'
+import { INTEL_SESSION_KEY } from './hooks/useChat'
 import { version } from '../package.json'
 import { motion } from 'framer-motion'
 import { Brain, TrendingUp } from 'lucide-react'
@@ -41,6 +43,8 @@ declare global {
       close: () => void
       isMaximized: () => Promise<boolean>
       onMaximizeChange: (cb: (maximized: boolean) => void) => void
+      isFullScreen: () => Promise<boolean>
+      onFullScreenChange: (cb: (fullscreen: boolean) => void) => void
       getMissingKeysSync: () => string[]
       getMissingKeys: () => Promise<string[]>
       getEnvValues: () => Promise<Record<string, string>>
@@ -51,6 +55,8 @@ declare global {
       onUpdateDownloaded: (cb: (version: string) => void) => void
       installUpdate: () => void
       captureScreenshot: () => Promise<string | null>
+      isNoAIMode: () => Promise<boolean>
+      clearKeys: (keys: string[], setNoAI?: boolean) => Promise<void>
     }
   }
 }
@@ -69,6 +75,7 @@ export default function App() {
     }
   }, [])
   const [setupMissing, setSetupMissing] = useState<string[]>([])
+  const [noAIMode, setNoAIMode] = useState(false)
   const [updateState, setUpdateState] = useState<{ version: string; progress?: number; ready: boolean } | null>(null)
   const [activePanel, setActivePanel] = useState<ActivePanel>('chat')
   const [showLanding, setShowLanding] = useState(true)
@@ -123,9 +130,213 @@ export default function App() {
     calendarEvents: eve.calendarEvents,
   })
 
+  const intelSessionIdRef = useRef<string | null>(localStorage.getItem(INTEL_SESSION_KEY))
+
+  // ── Global PTT for non-COMMS panels ────────────────────────────────────
+  // ChatInput's voice hook is only mounted when activePanel === 'chat'.
+  // This handler covers all other panels — records, transcribes via Scribe,
+  // then fires sendInNewSession + VoiceBubble without switching panels.
+  const activePanelRef = useRef(activePanel)
+  useEffect(() => { activePanelRef.current = activePanel }, [activePanel])
+
+  const globalPttRecorderRef = useRef<MediaRecorder | null>(null)
+  const globalPttPhaseRef    = useRef<'off' | 'listening'>('off')
+  const globalPttKeyRef      = useRef(localStorage.getItem('aurora_ptt_key') ?? '`')
+  const globalNoiseFloorRef  = useRef(Number(localStorage.getItem('aurora_noise_floor') ?? '12'))
+
+  useEffect(() => {
+    const onKey = (e: Event) => { globalPttKeyRef.current     = (e as CustomEvent<string>).detail }
+    const onNF  = (e: Event) => { globalNoiseFloorRef.current = (e as CustomEvent<number>).detail }
+    window.addEventListener('aurora_ptt_changed',        onKey)
+    window.addEventListener('aurora_noise_floor_changed', onNF)
+    return () => {
+      window.removeEventListener('aurora_ptt_changed',        onKey)
+      window.removeEventListener('aurora_noise_floor_changed', onNF)
+    }
+  }, [])
+
+  const startGlobalPttRef = useRef<() => void>(() => {})
+  const stopGlobalPttRef  = useRef<() => void>(() => {})
+
+  useEffect(() => {
+    startGlobalPttRef.current = async () => {
+      if (globalPttPhaseRef.current !== 'off') return
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false })
+        const audioCtx  = new AudioContext()
+        const source    = audioCtx.createMediaStreamSource(stream)
+        const analyser  = audioCtx.createAnalyser()
+        analyser.fftSize = 256
+        source.connect(analyser)
+        const freqData = new Uint8Array(analyser.frequencyBinCount)
+        let peakLevel = 0
+        const levelTimer = setInterval(() => {
+          analyser.getByteFrequencyData(freqData)
+          const avg = freqData.reduce((a, b) => a + b, 0) / freqData.length
+          if (avg > peakLevel) peakLevel = avg
+        }, 50)
+
+        const recorder = new MediaRecorder(stream)
+        const chunks: Blob[] = []
+        recorder.ondataavailable = (e) => { if (e.data.size > 0) chunks.push(e.data) }
+        recorder.onstop = async () => {
+          clearInterval(levelTimer)
+          audioCtx.close()
+          stream.getTracks().forEach(t => t.stop())
+          globalPttPhaseRef.current = 'off'
+          if (peakLevel < globalNoiseFloorRef.current) return
+          const blob = new Blob(chunks, { type: recorder.mimeType || 'audio/webm' })
+          try {
+            const resp = await fetch('/api/stt', {
+              method: 'POST',
+              headers: { 'Content-Type': blob.type },
+              body: blob,
+            })
+            const data = await resp.json() as { text?: string }
+            const transcript = (data.text ?? '').trim()
+            if (transcript.length >= 2 && /[a-zA-Z0-9]/.test(transcript)) {
+              chat.sendInNewSession(transcript)
+              setShowVoiceBubble(true)
+            }
+          } catch (err) {
+            console.error('[GlobalPTT] STT failed:', err)
+          }
+        }
+        recorder.start()
+        globalPttRecorderRef.current = recorder
+        globalPttPhaseRef.current = 'listening'
+      } catch (err) {
+        console.error('[GlobalPTT] getUserMedia failed:', err)
+        globalPttPhaseRef.current = 'off'
+      }
+    }
+
+    stopGlobalPttRef.current = () => {
+      if (globalPttRecorderRef.current?.state === 'recording') {
+        globalPttRecorderRef.current.stop()
+        globalPttRecorderRef.current = null
+      }
+    }
+  }) // runs every render to keep chat ref fresh
+
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key !== globalPttKeyRef.current || e.repeat) return
+      if (activePanelRef.current === 'chat') return
+      const tag = (document.activeElement as HTMLElement)?.tagName?.toLowerCase()
+      if (tag === 'input' || tag === 'textarea') return
+      startGlobalPttRef.current()
+    }
+    const onKeyUp = (e: KeyboardEvent) => {
+      if (e.key !== globalPttKeyRef.current) return
+      if (activePanelRef.current === 'chat') return
+      stopGlobalPttRef.current()
+    }
+    document.addEventListener('keydown', onKeyDown)
+    document.addEventListener('keyup',   onKeyUp)
+    return () => {
+      document.removeEventListener('keydown', onKeyDown)
+      document.removeEventListener('keyup',   onKeyUp)
+    }
+  }, [])
+
+  useEffect(() => {
+    const api = (window as any).electronAPI
+    if (!api?.onPttToggle) return
+    const unsub = api.onPttToggle(() => {
+      if (activePanelRef.current === 'chat') return
+      if (globalPttPhaseRef.current === 'listening') stopGlobalPttRef.current()
+      else startGlobalPttRef.current()
+    })
+    return unsub
+  }, [])
+
+  // Speak intel alerts via Aurora TTS and open/reuse an intel comms session
+  useEffect(() => {
+    const pick = <T,>(arr: T[]) => arr[Math.floor(Math.random() * arr.length)]
+    const handler = (e: Event) => {
+      const { urgency, system, jumps, count, characters, ships } = (e as CustomEvent<{ urgency: string; system?: string; jumps?: number; count?: number; characters?: string[]; ships?: string[] }>).detail
+      const j = jumps ?? 0
+      const gang = count != null ? ` ${count} additional hostile${count === 1 ? '' : 's'} reported.` : ''
+      const gangShort = count != null ? ` Plus ${count} more.` : ''
+      const gangFleet = count != null ? ` They've got numbers — ${count} confirmed additional.` : ''
+      let text: string
+      if (system && jumps != null && urgency === 'near') {
+        text = pick([
+          `Warning. Hostile contact in ${system}. ${j} jump${j === 1 ? '' : 's'} from your position.${gang} Get safe.`,
+          `Red alert. ${system}, ${j} out. They're close.${gangShort} Safe up now.`,
+          `Contact in ${system}. ${j} jump${j === 1 ? '' : 's'}. That's too close for comfort.${gang}`,
+          `Intel spike. ${system} has hostiles, just ${j} jump${j === 1 ? '' : 's'} away.${gangFleet} I'd move if I were you.`,
+          `${system}. ${j} jump${j === 1 ? '' : 's'}. Hostile confirmed.${gang} Watch yourself out there.`,
+        ])
+      } else if (system && jumps != null) {
+        text = pick([
+          `Heads up. Hostiles spotted in ${system}, ${j} jump${j === 1 ? '' : 's'} out.${gang}`,
+          `Intel coming in. ${system} has activity, ${j} jump${j === 1 ? '' : 's'} from you.${gangShort}`,
+          `Picking up hostile movement in ${system}. ${j} jump${j === 1 ? '' : 's'} away.${gang} Stay alert.`,
+          `${system} is lighting up. Hostiles reported, ${j} jump${j === 1 ? '' : 's'} from your location.${gangFleet}`,
+          `Contact. ${system}, ${j} jump${j === 1 ? '' : 's'}.${gang} Keep an eye on the gate.`,
+        ])
+      } else if (system) {
+        text = pick([
+          `Hostile activity reported in ${system}.${gang} Unknown distance.`,
+          `Intel ping on ${system}.${gangShort} Treat as unsafe.`,
+          `${system} flagged on intel.${gang} Proceed with caution.`,
+        ])
+      } else if (urgency === 'near') {
+        text = pick([
+          `Warning. Hostiles nearby.${gang} Safe up immediately.`,
+          `Close contact on intel.${gangShort} Get to safety now.`,
+          `They're close. Intel is pinging hostiles near your position.${gang}`,
+        ])
+      } else {
+        text = pick([
+          `Hostile reported in the area.${gang} Stay aware.`,
+          `Intel activity. Hostiles in your region.${gangShort} Eyes open.`,
+          `New contact on intel.${gang} Don't drop your guard.`,
+          `Something's moving on intel.${gangFleet} Watch yourself.`,
+        ])
+      }
+      // Build the user-side log entry (what was reported)
+      const parts: string[] = []
+      if (system) parts.push(`System: ${system}${jumps != null ? ` (${jumps} jump${jumps === 1 ? '' : 's'})` : ''}`)
+      if (characters && characters.length) parts.push(`Pilots: ${characters.join(', ')}`)
+      if (ships && ships.length) parts.push(`Ships: ${ships.join(', ')}`)
+      if (count) parts.push(`+${count} additional`)
+      const userEntry = parts.length ? parts.join(' · ') : 'Intel ping'
+      const report = buildIntelReport(
+        { urgency, system, jumps, count, characters, ships },
+        eve.shipLocation?.solarSystemId ?? null,
+        eve.shipLocation?.solarSystemName ?? null,
+      )
+
+      const existingId = intelSessionIdRef.current
+      const sessionExists = existingId && chat.conversations.some(c => c.id === existingId)
+      let targetId: string
+      if (sessionExists) {
+        targetId = existingId!
+        chat.setActiveId(targetId)
+      } else {
+        targetId = chat.newChat()
+        intelSessionIdRef.current = targetId
+        localStorage.setItem(INTEL_SESSION_KEY, targetId)
+        // Rename the session immediately so it's identifiable in the sidebar
+        chat.appendToSession(targetId, '⚠ INTEL FEED', 'Intel monitoring active. Alerts will appear here.')
+      }
+      chat.appendToSession(targetId, userEntry, report)
+      setShowLanding(false)
+      setActivePanel('chat')
+
+      chat.speakAlert(text)
+    }
+    window.addEventListener('aurora_intel_alert', handler)
+    return () => window.removeEventListener('aurora_intel_alert', handler)
+  }, [chat.speakAlert, chat.conversations, chat.setActiveId, chat.appendToSession, chat.newChat])
+
   // Handle EVE OAuth callback — server does the exchange and passes tokens back via URL params
   useEffect(() => {
     window.electronAPI?.onSetupRequired(missing => setSetupMissing(missing))
+    window.electronAPI?.isNoAIMode().then(setNoAIMode)
     window.electronAPI?.onUpdateAvailable(version => setUpdateState({ version, ready: false }))
     window.electronAPI?.onUpdateProgress(percent => setUpdateState(s => s ? { ...s, progress: percent } : null))
     window.electronAPI?.onUpdateDownloaded(version => setUpdateState({ version, ready: true }))
@@ -249,7 +460,8 @@ export default function App() {
   // Show landing page when no character, or when explicitly requested
   if (showLanding || !eve.character) {
     return (
-      <div className={`${darkMode ? 'dark' : ''} relative`}>
+      <div className={`${darkMode ? 'dark' : ''} relative flex flex-col`}>
+        <TitleBar />
         {showVoiceBubble && (
           <VoiceBubble
             messages={chat.activeConversation?.messages ?? []}
@@ -313,6 +525,8 @@ export default function App() {
     <div className={`h-screen flex flex-col overflow-hidden bg-eve-black font-mono ${darkMode ? 'dark' : ''}`}>
       {/* Scanline overlay */}
       <div className="scanline-overlay" />
+
+      <TitleBar />
 
       {/* Update banner */}
       {updateState && (
@@ -423,32 +637,6 @@ export default function App() {
 
           <OptionsMenu darkMode={darkMode} setDarkMode={setDarkMode} />
 
-          {/* Electron window controls — only shown inside the app */}
-          {window.electronAPI && (
-            <div className="flex items-center gap-0.5 ml-1 border-l border-eve-border pl-2">
-              <button
-                onClick={() => window.electronAPI!.minimize()}
-                title="Minimize"
-                className="w-6 h-5 flex items-center justify-center text-eve-dim hover:text-eve-cyan hover:bg-cyan-400/10 rounded-sm transition-colors"
-              >
-                <svg width="10" height="1" viewBox="0 0 10 1" fill="currentColor"><rect width="10" height="1"/></svg>
-              </button>
-              <button
-                onClick={() => window.electronAPI!.maximize()}
-                title="Toggle fullscreen"
-                className="w-6 h-5 flex items-center justify-center text-eve-dim hover:text-eve-cyan hover:bg-cyan-400/10 rounded-sm transition-colors"
-              >
-                <svg width="9" height="9" viewBox="0 0 9 9" fill="none" stroke="currentColor" strokeWidth="1.2"><rect x="0.5" y="0.5" width="8" height="8"/></svg>
-              </button>
-              <button
-                onClick={() => window.electronAPI!.close()}
-                title="Close"
-                className="w-6 h-5 flex items-center justify-center text-eve-dim hover:text-red-400 hover:bg-red-500/15 rounded-sm transition-colors"
-              >
-                <svg width="9" height="9" viewBox="0 0 9 9" stroke="currentColor" strokeWidth="1.2"><line x1="0" y1="0" x2="9" y2="9"/><line x1="9" y1="0" x2="0" y2="9"/></svg>
-              </button>
-            </div>
-          )}
         </div>
       </header>
 
@@ -458,8 +646,9 @@ export default function App() {
         <Sidebar
           conversations={chat.conversations}
           activeId={chat.activeId}
-          onSelect={chat.setActiveId}
+          onSelect={(id) => { chat.setActiveId(id); setActivePanel('chat') }}
           onNew={chat.newChat}
+          onClearAll={chat.clearAllConversations}
           onDelete={chat.deleteConversation}
           darkMode={darkMode}
           onToggleDark={() => setDarkMode(v => !v)}
@@ -475,6 +664,8 @@ export default function App() {
           isSpeaking={chat.isSpeaking}
           characterName={eve.character?.characterName}
           voiceEnabled={chat.voiceEnabled}
+          onToggleVoice={chat.toggleVoice}
+          showVoiceToggle={activePanel !== 'chat'}
           autoListenTrigger={chat.autoListenTrigger}
           onVoiceQuery={(text) => {
             handleVoiceQuery(text, (t) => { chat.sendInNewSession(t); setActivePanel('chat') })
@@ -494,6 +685,8 @@ export default function App() {
             <div className={`flex-1 overflow-hidden flex flex-col p-4 ${activePanel === 'intel' ? '' : 'hidden'}`}>
               <IntelPanel
                 shipLocation={eve.shipLocation}
+                characterId={eve.character?.characterId}
+                characterName={eve.character?.characterName}
                 onZkillLookup={(query, category) => {
                   setZkillTarget({ query, category })
                   setActivePanel('zkill')
@@ -528,6 +721,7 @@ export default function App() {
                   streaming={chat.streaming}
                   toolStatus={chat.toolStatus}
                   onEditMessage={handleEditMessage}
+                  noAIMode={noAIMode}
                 />
                 <ChatInput
                   onSend={handleSend}
@@ -540,6 +734,7 @@ export default function App() {
                   onToggleVoice={chat.toggleVoice}
                   onOpenVoiceSettings={() => setShowVoiceSettings(true)}
                   autoListenTrigger={chat.autoListenTrigger}
+                  noAIMode={noAIMode}
                 />
               </>
             ) : activePanel === 'map' ? (
@@ -588,6 +783,7 @@ export default function App() {
                       setBlueprintImport(bp)
                       setActivePanel('industry')
                     }}
+                    noAIMode={noAIMode}
                   />
                 )}
                 {activePanel === 'market' && (

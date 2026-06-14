@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { RefreshCw, Factory, Truck, AlertTriangle, ArrowRight, FlaskConical, CheckCircle2, XCircle, Search, X, ShoppingCart, Zap, Wrench, ChevronDown, ChevronRight as ChevronRightIcon } from 'lucide-react'
+import { RefreshCw, Factory, Truck, AlertTriangle, ArrowRight, FlaskConical, CheckCircle2, XCircle, Search, X, ShoppingCart, Zap, Wrench, ChevronDown, ChevronRight as ChevronRightIcon, Copy, Check } from 'lucide-react'
 import type { EveIndustryJob, EveSkill, EveAsset, EveCharacter } from '../../types'
 import { timeUntil, formatISK } from '../../lib/eve-esi'
 
@@ -78,6 +78,34 @@ function JobProgress({ job }: { job: EveIndustryJob }) {
   )
 }
 
+function copyToClipboard(text: string) {
+  try {
+    const ta = document.createElement('textarea')
+    ta.value = text
+    ta.style.position = 'fixed'
+    ta.style.opacity = '0'
+    document.body.appendChild(ta)
+    ta.select()
+    document.execCommand('copy')
+    document.body.removeChild(ta)
+  } catch {
+    navigator.clipboard.writeText(text).catch(() => {})
+  }
+}
+
+function CopyBtn({ value, className = '' }: { value: string; className?: string }) {
+  const [copied, setCopied] = useState(false)
+  return (
+    <button
+      onClick={() => { copyToClipboard(value); setCopied(true); setTimeout(() => setCopied(false), 1500) }}
+      className={`text-eve-dim hover:text-eve-cyan transition-colors ${className}`}
+      title="Copy"
+    >
+      {copied ? <Check size={11} className="text-eve-green" /> : <Copy size={11} />}
+    </button>
+  )
+}
+
 function FreightCalculator({
   freightImport,
   onFreightImportClear,
@@ -126,11 +154,14 @@ function FreightCalculator({
         <div>
           <div className="eve-label mb-1 flex items-center justify-between">
             <span>VOLUME (M³)</span>
-            {volExceeded && (
-              <span className="text-eve-red text-[9px] flex items-center gap-1">
-                <AlertTriangle size={9} />EXCEEDS MAX
-              </span>
-            )}
+            <div className="flex items-center gap-1.5">
+              {volExceeded && (
+                <span className="text-eve-red text-[9px] flex items-center gap-1">
+                  <AlertTriangle size={9} />EXCEEDS MAX
+                </span>
+              )}
+              {vol > 0 && <CopyBtn value={String(Math.round(vol))} />}
+            </div>
           </div>
           <input
             type="number"
@@ -158,7 +189,10 @@ function FreightCalculator({
         </div>
 
         <div>
-          <div className="eve-label mb-1">COLLATERAL (ISK)</div>
+          <div className="eve-label mb-1 flex items-center justify-between">
+            <span>COLLATERAL (ISK)</span>
+            {col > 0 && <CopyBtn value={String(Math.round(col))} />}
+          </div>
           <input
             type="number"
             min="0"
@@ -193,7 +227,10 @@ function FreightCalculator({
               ))}
               <div className="border-t border-eve-border/50 pt-2 flex items-baseline justify-between">
                 <span className="text-[10px] text-eve-cyan tracking-widest">CONTRACT REWARD</span>
-                <span className="text-sm font-mono text-eve-cyan text-glow-cyan">{formatISK(total)}</span>
+                <div className="flex items-center gap-2">
+                  <CopyBtn value={String(total)} />
+                  <span className="text-sm font-mono text-eve-cyan text-glow-cyan">{formatISK(total)}</span>
+                </div>
               </div>
             </div>
           </motion.div>

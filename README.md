@@ -13,8 +13,8 @@ Aurora is a personal AI assistant for EVE Online pilots, built as a standalone W
 - **Assets** — Searchable asset list across all locations and containers
 - **Market** — Active buy/sell orders, price history charts, and Trade Agent scan (relist opportunities, mislisted items, high-volume picks)
 - **Appraisal** — Paste a cargo scan or item list for instant Janice appraisal
-- **zKillboard** — Inline killboard with ship renders and pilot portraits
-- **Intel** — Local intel log parsing with threat highlighting and auto-detected player location
+- **zKillboard** — Inline killboard with ship renders and pilot portraits; supports character, corporation, and alliance lookups
+- **Intel** — Local intel log parsing with threat highlighting, auto-detected player location, and voice alerts via Aurora TTS
 - **Star Map** — Interactive galaxy map with route planning, jump bridge support, and region/system search
 - **Voice** — Wake word activation ("Aurora"), voice input, and ElevenLabs voice synthesis (optional). Offline voice via Vosk also supported.
 - **Wallet** — Transaction and journal history across all characters
@@ -25,7 +25,7 @@ Aurora is a personal AI assistant for EVE Online pilots, built as a standalone W
 
 ## Installation
 
-1. Download **Aurora-Alpha-Setup-1.0.4.exe** from the [latest release](https://github.com/kamiiwinaru/aurora-alpha/releases/latest)
+1. Download **Aurora-Alpha-Setup-1.0.5.exe** from the [latest release](https://github.com/kamiiwinaru/aurora-alpha/releases/latest)
 2. Run the installer
 3. On first launch, enter your **Anthropic API key** ([get one here](https://console.anthropic.com))
 4. Log in with your EVE account via the EVE SSO button

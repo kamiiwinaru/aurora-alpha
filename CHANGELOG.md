@@ -1,5 +1,32 @@
 # Changelog
 
+## [1.0.5] — 2026-06-14
+
+### Added
+- Intel alerts now trigger Aurora's voice — when a hostile is reported within range, Aurora speaks a randomised alert line and logs the report into a dedicated Intel comms session automatically.
+- Push-to-talk now works on every panel, not just COMMS — holding the PTT key on any panel sends voice to Aurora and shows the response in the Voice Bubble overlay.
+- ElevenLabs Scribe speech-to-text added as the PTT transcription backend, replacing browser Web Speech API for audio recording.
+- Google Speech API key support — the key is now passed directly to Chromium's Web Speech API so voice input works in the Electron app without a separate service.
+- zKillboard now supports corporation and alliance lookups in addition to character searches.
+- Intel log auto-discovery — the Intel panel can now detect and load the most recent log files automatically without manually entering a channel name, and filters by active character.
+- No-AI mode — Aurora can now run without an Anthropic API key for users who only need EVE data tools.
+- TitleBar now appears on both the landing page and main app view for consistent window controls across all states.
+- Sidebar now has a "Clear All" button to delete all conversations at once.
+- Escape key exits fullscreen in the Electron app.
+- Voice toggle button added to the Aurora avatar panel when on non-COMMS panels.
+
+### Changed
+- Intel log parser now extracts the Listener (character name) from log headers and uses it to pick the correct log file when multiple characters have logs for the same channel.
+- Intel chatlog directory path now auto-detects the Windows username instead of being hardcoded.
+- Window maximize/fullscreen behaviour corrected — maximize and fullscreen are now separate actions with proper IPC events for state tracking.
+- Window controls moved to TitleBar component exclusively; duplicate controls removed from the main app header.
+- Clicking a conversation in the sidebar now also navigates to the COMMS panel.
+- Discord webhook URL moved to a gitignored `secrets.ts` file so it is never committed to the repo.
+- Vosk offline recognition stubbed out pending Smart App Control investigation — Web Speech API is used as the voice backend in this build.
+
+### Fixed
+- Intel log parser now generates unique IDs for duplicate timestamp+character entries, preventing React key collisions when the same pilot sends multiple messages in one second.
+
 ## [1.0.4] — 2026-06-13
 
 ### Added

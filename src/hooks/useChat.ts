@@ -21,7 +21,8 @@ function newConversation(): Conversation {
   }
 }
 
-const STORAGE_KEY = 'aurora_conversations'
+const STORAGE_KEY       = 'aurora_conversations'
+export const INTEL_SESSION_KEY = 'aurora_intel_session_id'
 
 const SESSION_TTL_MS = 48 * 60 * 60 * 1000 // 48 hours
 
@@ -31,6 +32,7 @@ function loadConversations(): Conversation[] {
     if (!raw) return []
     const parsed = JSON.parse(raw)
     const cutoff = Date.now() - SESSION_TTL_MS
+    const intelId = localStorage.getItem(INTEL_SESSION_KEY)
     return parsed
       .map((c: Conversation) => ({
         ...c,
@@ -38,7 +40,7 @@ function loadConversations(): Conversation[] {
         updatedAt: new Date(c.updatedAt),
         messages: c.messages.map((m: Message) => ({ ...m, timestamp: new Date(m.timestamp) })),
       }))
-      .filter((c: Conversation) => c.createdAt.getTime() > cutoff)
+      .filter((c: Conversation) => c.id === intelId || c.createdAt.getTime() > cutoff)
   } catch {
     return []
   }
@@ -88,9 +90,10 @@ export function useChat(eveContext?: EveContext) {
   const [streaming, setStreaming] = useState(false)
   const [isSpeaking, setIsSpeaking] = useState(false)
   const [toolStatus, setToolStatus] = useState<string | null>(null)
-  // Default to false — voice must be explicitly enabled per session.
-  // Only restore true if this is the sole tab (no other session has claimed voice).
-  const [voiceEnabled, setVoiceEnabled] = useState<boolean>(false)
+  // Default to true — restore false only if user has explicitly disabled it.
+  const [voiceEnabled, setVoiceEnabled] = useState<boolean>(
+    () => localStorage.getItem(VOICE_ENABLED_KEY) !== 'false'
+  )
   const voiceChannelRef = useRef<BroadcastChannel | null>(null)
   const [ttsMode, setTtsMode] = useState<TtsMode>(
     () => (localStorage.getItem(TTS_MODE_KEY) as TtsMode | null) ?? 'standard'
@@ -156,11 +159,14 @@ export function useChat(eveContext?: EveContext) {
 
   const activeConversation = conversations.find(c => c.id === activeId) ?? null
 
-  const update = useCallback((id: string, updater: (c: Conversation) => Conversation) => {
+  const update = useCallback((id: string, updater: (c: Conversation) => Conversation, bubbleToTop = false) => {
     setConversations(prev => {
       const next = prev.map(c => c.id === id ? updater(c) : c)
-      saveConversations(next)
-      return next
+      const result = bubbleToTop
+        ? [next.find(c => c.id === id)!, ...next.filter(c => c.id !== id)]
+        : next
+      saveConversations(result)
+      return result
     })
   }, [])
 
@@ -187,6 +193,16 @@ export function useChat(eveContext?: EveContext) {
       return remaining[0]?.id ?? null
     })
   }, [conversations])
+
+  const clearAllConversations = useCallback(() => {
+    const intelId = localStorage.getItem(INTEL_SESSION_KEY)
+    setConversations(prev => {
+      const next = prev.filter(c => c.id === intelId)
+      saveConversations(next)
+      return next
+    })
+    setActiveId(intelId)
+  }, [])
 
   const buildSystemPrompt = useCallback((): { systemStatic: string; systemDynamic: string } => {
     const systemStatic = `You are Aurora, an advanced Capsuleer Intelligence System integrated into the EVE Online universe. You are a shipboard AI — precise, terse, mission-focused. No filler. No pleasantries. Deliver what the pilot needs and stop.
@@ -390,11 +406,7 @@ If the pilot asks about the game, high scores, strategy, or their current ship t
     return { systemStatic, systemDynamic }
   }, [eveContext])
 
-  const sendMessage = useCallback(async (content: string) => {
-    let convId = activeId
-    if (!convId) {
-      convId = newChat()
-    }
+  const sendToSession = useCallback(async (convId: string, content: string) => {
 
     const userMsg: Message = {
       id: generateId(),
@@ -541,7 +553,13 @@ If the pilot asks about the game, high scores, strategy, or their current ship t
     } else {
       setIsSpeaking(false)
     }
-  }, [activeId, conversations, newChat, update, buildSystemPrompt, voiceEnabled, ttsMode])
+  }, [conversations, update, buildSystemPrompt, voiceEnabled, ttsMode])
+
+  const sendMessage = useCallback(async (content: string) => {
+    let convId = activeId
+    if (!convId) convId = newChat()
+    return sendToSession(convId, content)
+  }, [activeId, newChat, sendToSession])
 
   // Atomically creates a new conversation and sends the first message into it.
   // Unlike calling newChat() + sendMessage() sequentially, this never reads the
@@ -702,6 +720,39 @@ If the pilot asks about the game, high scores, strategy, or their current ship t
     }
   }, [buildSystemPrompt, eveContext?.character?.characterId, voiceEnabled, ttsMode])
 
+  const speakAlert = useCallback(async (text: string) => {
+    if (!voiceEnabled) return
+    try {
+      const res = await fetch('/api/tts', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text, mode: 'full' }),
+      })
+      if (!res.ok) return
+      const arrayBuffer = await res.arrayBuffer()
+      const ctx = new AudioContext()
+      const audioBuffer = await ctx.decodeAudioData(arrayBuffer)
+      const source = ctx.createBufferSource()
+      source.buffer = audioBuffer
+      const gain = ctx.createGain()
+      gain.gain.value = Number(localStorage.getItem('aurora_tts_volume') ?? '1')
+      source.connect(gain)
+      gain.connect(ctx.destination)
+      source.onended = () => ctx.close()
+      source.start(0)
+    } catch { /* blocked */ }
+  }, [voiceEnabled])
+
+  const appendToSession = useCallback((convId: string, userText: string, assistantText: string) => {
+    const now = new Date()
+    const userMsg: Message = { id: generateId(), role: 'user', content: userText, timestamp: now }
+    const assistantMsg: Message = { id: generateId(), role: 'assistant', content: assistantText, timestamp: now }
+    update(convId, c => {
+      const title = c.messages.length === 0 ? userText.slice(0, 40) : c.title
+      return { ...c, messages: [...c.messages, userMsg, assistantMsg], title, updatedAt: now }
+    }, true)
+  }, [update])
+
   const stopStreaming = useCallback(() => {
     abortRef.current?.abort()
     if (audioRef.current) {
@@ -739,6 +790,10 @@ If the pilot asks about the game, high scores, strategy, or their current ship t
     stopStreaming,
     newChat,
     deleteConversation,
+    clearAllConversations,
     trimToMessage,
+    speakAlert,
+    sendToSession,
+    appendToSession,
   }
 }

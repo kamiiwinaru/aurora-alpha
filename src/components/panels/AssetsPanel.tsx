@@ -17,6 +17,7 @@ interface AssetsPanelProps {
   characterId?: number
   onRefresh: () => void
   onBlueprintClick?: (bp: BlueprintImport) => void
+  noAIMode?: boolean
 }
 
 const QUICK_ASKS = [
@@ -107,7 +108,7 @@ function AssetRow({
   )
 }
 
-export default function AssetsPanel({ assets, blueprints = [], loading, characterId, onRefresh, onBlueprintClick }: AssetsPanelProps) {
+export default function AssetsPanel({ assets, blueprints = [], loading, characterId, onRefresh, onBlueprintClick, noAIMode }: AssetsPanelProps) {
   // Build itemId → blueprint lookup for ME/TE
   const blueprintByItemId = useMemo(() =>
     new Map(blueprints.map(b => [b.itemId, b])), [blueprints]
@@ -237,39 +238,48 @@ export default function AssetsPanel({ assets, blueprints = [], loading, characte
         <div className="eve-header flex items-center gap-2 mb-0">
           <Bot size={11} /> ASK AURORA
         </div>
+        {noAIMode && (
+          <div className="text-eve-muted text-[10px] tracking-wide opacity-60 select-none py-1">
+            AI agent unavailable — Anthropic API key required
+          </div>
+        )}
 
-        {/* Quick-ask chips */}
-        <div className="flex flex-wrap gap-1">
-          {QUICK_ASKS.map(({ label, q }) => (
-            <button
-              key={label}
-              onClick={() => submitQuery(q)}
-              disabled={querying}
-              className="px-2 py-0.5 text-[9px] uppercase tracking-wider border border-eve-border text-eve-muted hover:text-eve-cyan hover:border-eve-cyan/50 transition-colors disabled:opacity-40"
-            >
-              {label}
-            </button>
-          ))}
-        </div>
+        {!noAIMode && (
+          <>
+            {/* Quick-ask chips */}
+            <div className="flex flex-wrap gap-1">
+              {QUICK_ASKS.map(({ label, q }) => (
+                <button
+                  key={label}
+                  onClick={() => submitQuery(q)}
+                  disabled={querying}
+                  className="px-2 py-0.5 text-[9px] uppercase tracking-wider border border-eve-border text-eve-muted hover:text-eve-cyan hover:border-eve-cyan/50 transition-colors disabled:opacity-40"
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
 
-        <div className="flex gap-2">
-          <input
-            ref={inputRef}
-            className="eve-input flex-1 py-1.5 text-xs"
-            placeholder="How much Tritanium do I have? Where are my ships?"
-            value={query}
-            onChange={e => setQuery(e.target.value)}
-            onKeyDown={e => { if (e.key === 'Enter') submitQuery() }}
-            disabled={querying}
-          />
-          <button
-            onClick={() => submitQuery()}
-            disabled={!query.trim() || querying}
-            className="eve-btn-primary px-2 py-1 disabled:opacity-40"
-          >
-            <Send size={11} />
-          </button>
-        </div>
+            <div className="flex gap-2">
+              <input
+                ref={inputRef}
+                className="eve-input flex-1 py-1.5 text-xs"
+                placeholder="How much Tritanium do I have? Where are my ships?"
+                value={query}
+                onChange={e => setQuery(e.target.value)}
+                onKeyDown={e => { if (e.key === 'Enter') submitQuery() }}
+                disabled={querying}
+              />
+              <button
+                onClick={() => submitQuery()}
+                disabled={!query.trim() || querying}
+                className="eve-btn-primary px-2 py-1 disabled:opacity-40"
+              >
+                <Send size={11} />
+              </button>
+            </div>
+          </>
+        )}
 
         {querying && (
           <div className="text-eve-muted text-[11px] animate-pulse">Querying inventory…</div>

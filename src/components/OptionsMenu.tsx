@@ -6,6 +6,10 @@ const MIC_DEVICE_KEY   = 'aurora_mic_device_id'
 const VOLUME_KEY       = 'aurora_tts_volume'
 const FONT_SIZE_KEY    = 'aurora_font_size'
 const FONT_DENSITY_KEY = 'aurora_font_density'
+export const PTT_KEY_STORAGE    = 'aurora_ptt_key'
+export const PTT_KEY_DEFAULT    = '`'
+export const NOISE_FLOOR_KEY    = 'aurora_noise_floor'
+export const NOISE_FLOOR_DEFAULT = 12
 
 interface MicDevice { deviceId: string; label: string }
 
@@ -97,6 +101,74 @@ function ThemeSection({ darkMode, setDarkMode }: { darkMode: boolean; setDarkMod
   )
 }
 
+// ── Anthropic ─────────────────────────────────────────────────────────────────
+function AnthropicSection() {
+  const [apiKey, setApiKey] = useState('')
+  const [status, setStatus] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle')
+  const isElectron = !!window.electronAPI
+
+  useEffect(() => {
+    if (isElectron) {
+      window.electronAPI.getEnvValues().then((vals: Record<string, string>) => {
+        setApiKey(vals.ANTHROPIC_API_KEY ?? '')
+      }).catch(() => {})
+    }
+  }, [isElectron])
+
+  async function save() {
+    if (!apiKey.trim() || apiKey.includes('•')) return
+    setStatus('saving')
+    try {
+      await window.electronAPI!.saveEnvValues({
+        ANTHROPIC_API_KEY: apiKey.trim(),
+        AURORA_NO_AI: 'false',
+      })
+      setStatus('saved')
+    } catch { setStatus('error') }
+  }
+
+  if (!isElectron) return null
+
+  return (
+    <div>
+      <Label>Anthropic API Key</Label>
+      <div className="flex flex-col gap-1.5">
+        <input
+          type="password"
+          placeholder="sk-ant-api03-..."
+          value={apiKey}
+          onChange={e => setApiKey(e.target.value)}
+          className="eve-input text-[10px] py-1 px-2"
+        />
+        <div className="flex gap-1.5">
+          <button
+            onClick={save}
+            disabled={status === 'saving' || !apiKey.trim() || apiKey.includes('•')}
+            className="eve-btn flex-1 text-[10px] py-1 disabled:opacity-40"
+          >
+            {status === 'saving' ? 'SAVING…' :
+             status === 'saved'  ? 'RESTARTING…' :
+             status === 'error'  ? 'ERROR — RETRY' :
+             'SAVE'}
+          </button>
+          <button
+            onClick={() => {
+              if (!confirm('Remove Anthropic API key and disable AI features?')) return
+              window.electronAPI!.clearKeys(['ANTHROPIC_API_KEY'], true)
+            }}
+            disabled={status === 'saving'}
+            className="eve-btn text-[10px] py-1 px-2 text-eve-red hover:border-eve-red/40 disabled:opacity-40"
+            title="Remove key and disable AI"
+          >
+            REMOVE
+          </button>
+        </div>
+        <p className="text-[9px] text-eve-dim">App will restart to apply. Also re-enables AI features if disabled.</p>
+      </div>
+    </div>
+  )
+}
+
 // ── ElevenLabs ────────────────────────────────────────────────────────────────
 function ElevenLabsSection() {
   const [apiKey,  setApiKey]  = useState('')
@@ -157,16 +229,31 @@ function ElevenLabsSection() {
           onChange={e => setVoiceId(e.target.value)}
           className="eve-input text-[10px] py-1 px-2"
         />
-        <button
-          onClick={save}
-          disabled={status === 'saving'}
-          className="eve-btn text-[10px] py-1"
-        >
-          {status === 'saving' ? 'SAVING…' :
-           status === 'saved'  ? (isElectron ? 'RESTARTING…' : 'SAVED') :
-           status === 'error'  ? 'ERROR — RETRY' :
-           'SAVE'}
-        </button>
+        <div className="flex gap-1.5">
+          <button
+            onClick={save}
+            disabled={status === 'saving'}
+            className="eve-btn flex-1 text-[10px] py-1"
+          >
+            {status === 'saving' ? 'SAVING…' :
+             status === 'saved'  ? (isElectron ? 'RESTARTING…' : 'SAVED') :
+             status === 'error'  ? 'ERROR — RETRY' :
+             'SAVE'}
+          </button>
+          {isElectron && (
+            <button
+              onClick={() => {
+                if (!confirm('Remove ElevenLabs API key and Voice ID?')) return
+                window.electronAPI!.clearKeys(['ELEVENLABS_API_KEY', 'ELEVENLABS_VOICE_ID'])
+              }}
+              disabled={status === 'saving'}
+              className="eve-btn text-[10px] py-1 px-2 text-eve-red hover:border-eve-red/40 disabled:opacity-40"
+              title="Remove ElevenLabs keys"
+            >
+              REMOVE
+            </button>
+          )}
+        </div>
         {isElectron && status === 'idle' && (
           <p className="text-[9px] text-eve-dim">App will restart to apply key changes.</p>
         )}
@@ -275,6 +362,119 @@ function DisplaySection() {
   )
 }
 
+// ── PTT Key ───────────────────────────────────────────────────────────────────
+const MODIFIER_KEYS = new Set(['Shift','Control','Alt','Meta','CapsLock','Tab','OS'])
+
+function formatKey(key: string): string {
+  if (key === ' ') return 'Space'
+  if (key === 'Escape') return 'Esc'
+  if (key === 'ArrowUp') return '↑'
+  if (key === 'ArrowDown') return '↓'
+  if (key === 'ArrowLeft') return '←'
+  if (key === 'ArrowRight') return '→'
+  return key.length === 1 ? key.toUpperCase() : key
+}
+
+function PttKeySection() {
+  const [currentKey, setCurrentKey] = useState(() => localStorage.getItem(PTT_KEY_STORAGE) ?? PTT_KEY_DEFAULT)
+  const [capturing, setCapturing] = useState(false)
+
+  useEffect(() => {
+    if (!capturing) return
+    function onKeyDown(e: KeyboardEvent) {
+      e.preventDefault()
+      e.stopPropagation()
+      if (MODIFIER_KEYS.has(e.key)) return
+      const key = e.key
+      setCurrentKey(key)
+      setCapturing(false)
+      localStorage.setItem(PTT_KEY_STORAGE, key)
+      window.dispatchEvent(new CustomEvent('aurora_ptt_changed', { detail: key }))
+      const api = (window as any).electronAPI
+      api?.setPttKey?.(key)
+    }
+    function onKeyUp(e: KeyboardEvent) {
+      if (e.key === 'Escape') { e.preventDefault(); setCapturing(false) }
+    }
+    window.addEventListener('keydown', onKeyDown, true)
+    window.addEventListener('keyup', onKeyUp, true)
+    return () => {
+      window.removeEventListener('keydown', onKeyDown, true)
+      window.removeEventListener('keyup', onKeyUp, true)
+    }
+  }, [capturing])
+
+  return (
+    <div>
+      <Label>PTT Key</Label>
+      <div className="flex items-center gap-2">
+        <kbd className="px-2 py-1 text-[11px] font-mono text-cyan-300 bg-cyan-400/10 border border-cyan-400/30 rounded-sm min-w-[2rem] text-center">
+          {formatKey(currentKey)}
+        </kbd>
+        <button
+          onClick={() => setCapturing(true)}
+          className={`flex-1 text-[10px] py-1 border rounded-sm transition-colors ${
+            capturing
+              ? 'border-cyan-400/60 text-cyan-400 bg-cyan-400/10 animate-pulse'
+              : 'border-eve-border text-eve-muted hover:border-cyan-400/30 hover:text-cyan-400/70'
+          }`}
+        >
+          {capturing ? 'PRESS ANY KEY…' : 'REBIND'}
+        </button>
+        {currentKey !== PTT_KEY_DEFAULT && (
+          <button
+            onClick={() => {
+              setCurrentKey(PTT_KEY_DEFAULT)
+              localStorage.setItem(PTT_KEY_STORAGE, PTT_KEY_DEFAULT)
+              window.dispatchEvent(new CustomEvent('aurora_ptt_changed', { detail: PTT_KEY_DEFAULT }))
+              const api = (window as any).electronAPI
+              api?.setPttKey?.(PTT_KEY_DEFAULT)
+            }}
+            className="text-[9px] text-eve-dim hover:text-eve-muted transition-colors"
+            title="Reset to default"
+          >
+            RESET
+          </button>
+        )}
+      </div>
+      <p className="text-[9px] text-eve-dim mt-1">Hold in-window · Toggle when Aurora is background</p>
+    </div>
+  )
+}
+
+// ── Noise Floor ───────────────────────────────────────────────────────────────
+function NoiseFloorSection() {
+  const [value, setValue] = useState(() =>
+    Number(localStorage.getItem(NOISE_FLOOR_KEY) ?? NOISE_FLOOR_DEFAULT)
+  )
+
+  function change(v: number) {
+    setValue(v)
+    localStorage.setItem(NOISE_FLOOR_KEY, String(v))
+    window.dispatchEvent(new CustomEvent('aurora_noise_floor_changed', { detail: v }))
+  }
+
+  return (
+    <div>
+      <Label>Speech Input Sensitivity</Label>
+      <div className="flex items-center gap-2">
+        <input
+          type="range"
+          min={0} max={40} step={1}
+          value={value}
+          onChange={e => change(Number(e.target.value))}
+          className="flex-1 accent-cyan-400 h-1"
+        />
+        <span className="text-[10px] text-eve-muted w-6 text-right font-mono">{value}</span>
+      </div>
+      <div className="flex justify-between text-[9px] text-eve-dim mt-0.5">
+        <span>Sensitive</span>
+        <span>Strict</span>
+      </div>
+    </div>
+  )
+}
+
 // ── Main component ────────────────────────────────────────────────────────────
 interface OptionsMenuProps {
   darkMode?: boolean
@@ -343,7 +543,13 @@ export default function OptionsMenu({ darkMode, setDarkMode }: OptionsMenuProps)
             )}
             <MicSection />
             <Divider />
+            <PttKeySection />
+            <Divider />
+            <NoiseFloorSection />
+            <Divider />
             <VolumeSection />
+            <Divider />
+            <AnthropicSection />
             <Divider />
             <ElevenLabsSection />
             <Divider />

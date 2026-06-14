@@ -3,27 +3,30 @@ import { motion, AnimatePresence } from 'framer-motion'
 import { Search, ExternalLink, RefreshCw, Skull, Shield } from 'lucide-react'
 import { formatISK } from '../../lib/eve-esi'
 
-type ZkillCategory = 'character' | 'system' | 'constellation' | 'region'
+type ZkillCategory = 'character' | 'corporation' | 'alliance' | 'system' | 'region'
 
 const CATEGORIES: { id: ZkillCategory; label: string }[] = [
-  { id: 'character',     label: 'CHARACTER'     },
-  { id: 'system',        label: 'SYSTEM'        },
-  { id: 'constellation', label: 'CONSTELLATION' },
-  { id: 'region',        label: 'REGION'        },
+  { id: 'character',   label: 'CHARACTER'   },
+  { id: 'corporation', label: 'CORPORATION' },
+  { id: 'alliance',    label: 'ALLIANCE'    },
+  { id: 'system',      label: 'SYSTEM'      },
+  { id: 'region',      label: 'REGION'      },
 ]
 
 const ESI_KEY_MAP: Record<ZkillCategory, string> = {
-  character:    'characters',
-  system:       'systems',
-  constellation:'constellations',
-  region:       'regions',
+  character:   'characters',
+  corporation: 'corporations',
+  alliance:    'alliances',
+  system:      'systems',
+  region:      'regions',
 }
 
 const ZKILL_PATH: Record<ZkillCategory, string> = {
-  character:    'character',
-  system:       'system',
-  constellation:'constellation',
-  region:       'region',
+  character:   'character',
+  corporation: 'corporation',
+  alliance:    'alliance',
+  system:      'system',
+  region:      'region',
 }
 
 interface ZkbMeta {
@@ -122,7 +125,10 @@ function KillRow({
   const { date, time } = formatTime(kill.killmail_time ?? '')
   const finalBlow = kill.attackers?.find(a => a.final_blow)
   const sec = systemSec[kill.solar_system_id]
-  const isLoss = category === 'character' && kill.victim?.character_id === searchedId
+  const isLoss =
+    (category === 'character'   && kill.victim?.character_id   === searchedId) ||
+    (category === 'corporation' && kill.victim?.corporation_id === searchedId) ||
+    (category === 'alliance'    && kill.victim?.alliance_id    === searchedId)
 
   return (
     <motion.div
@@ -343,7 +349,11 @@ export default function ZkillPanel({ target }: { target?: ZkillTarget | null }) 
 
   const handleKey = (e: React.KeyboardEvent) => { if (e.key === 'Enter') search() }
 
-  const losses = kills.filter(k => category === 'character' && k.victim?.character_id === resolvedId).length
+  const losses = kills.filter(k =>
+    (category === 'character'   && k.victim?.character_id   === resolvedId) ||
+    (category === 'corporation' && k.victim?.corporation_id === resolvedId) ||
+    (category === 'alliance'    && k.victim?.alliance_id    === resolvedId)
+  ).length
   const killCount = kills.length - losses
   const totalDestroyed = kills.reduce((s, k) => s + (k.zkb?.totalValue || 0), 0)
 
@@ -367,7 +377,7 @@ export default function ZkillPanel({ target }: { target?: ZkillTarget | null }) 
 
       {/* Search */}
       <div className="eve-panel p-3 flex flex-col gap-2 flex-shrink-0">
-        <div className="grid grid-cols-4 gap-1 mb-1">
+        <div className="grid grid-cols-5 gap-1 mb-1">
           {CATEGORIES.map(cat => (
             <button
               key={cat.id}
@@ -382,13 +392,19 @@ export default function ZkillPanel({ target }: { target?: ZkillTarget | null }) 
         <div className="flex gap-2">
           <input
             className="eve-input flex-1 py-2 text-sm"
-            placeholder={category === 'character' ? 'e.g. Kami Iwinaru' : category === 'system' ? 'e.g. HY-RWO, Jita' : category === 'constellation' ? 'e.g. Z-PNIA' : 'e.g. Delve, The Forge'}
+            placeholder={
+              category === 'character'   ? 'e.g. Kami Iwinaru' :
+              category === 'corporation' ? 'e.g. Brave Collective' :
+              category === 'alliance'    ? 'e.g. Goonswarm Federation' :
+              category === 'system'      ? 'e.g. HY-RWO, Jita' :
+                                           'e.g. Delve, The Forge'
+            }
             value={query}
             onChange={e => setQuery(e.target.value)}
             onKeyDown={handleKey}
           />
           <button
-            onClick={search}
+            onClick={() => search()}
             disabled={loading || !query.trim()}
             className="eve-btn-primary flex items-center gap-1.5 px-4 disabled:opacity-40"
           >
@@ -414,7 +430,7 @@ export default function ZkillPanel({ target }: { target?: ZkillTarget | null }) 
               <div className="text-eve-green text-sm font-mono">{killCount}</div>
               <div className="text-[9px] text-eve-muted">KILLS</div>
             </div>
-            {category === 'character' ? (
+            {['character', 'corporation', 'alliance'].includes(category) ? (
               <div className="eve-panel p-2 text-center">
                 <div className="text-eve-red text-sm font-mono">{losses}</div>
                 <div className="text-[9px] text-eve-muted">LOSSES</div>
@@ -480,7 +496,7 @@ export default function ZkillPanel({ target }: { target?: ZkillTarget | null }) 
       {!loading && kills.length === 0 && !error && !resolvedId && (
         <div className="flex-1 flex flex-col items-center justify-center text-center gap-2">
           <Skull size={40} className="text-eve-red/20" />
-          <div className="text-eve-muted text-xs">Search for a pilot, system, constellation, or region</div>
+          <div className="text-eve-muted text-xs">Search for a pilot, corporation, alliance, system, or region</div>
           <div className="text-eve-dim text-[10px]">Kills shown inline · Full board opens on zKillboard</div>
         </div>
       )}

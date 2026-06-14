@@ -174,6 +174,10 @@ export function useEve() {
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
+  // Persist to localStorage whenever state changes — never inside updater functions
+  useEffect(() => { saveCharacters(characters) }, [characters])
+  useEffect(() => { saveWalletCache(allWalletBalances) }, [allWalletBalances])
+
   const clearData = useCallback(() => {
     setSkills([]); setSkillQueue([]); setAssets([]); setIndustryJobs([]); setMarketOrders([])
     setWalletBalance(0); setWalletTransactions([]); setWalletJournal([])
@@ -188,7 +192,6 @@ export function useEve() {
     const removeId = characterId ?? activeCharacterId
     setCharacters(prev => {
       const next = prev.filter(c => c.characterId !== removeId)
-      saveCharacters(next)
       if (activeCharacterId === removeId) {
         const nextActive = next[0]?.characterId ?? null
         saveActiveId(nextActive)
@@ -226,13 +229,11 @@ export function useEve() {
       accessToken, refreshToken,
       expiresAt: Date.now() + expiresIn * 1000,
     }
-    setCharacters(prev => {
-      const next = prev.some(c => c.characterId === characterId)
+    setCharacters(prev =>
+      prev.some(c => c.characterId === characterId)
         ? prev.map(c => c.characterId === characterId ? char : c)
         : [...prev, char]
-      saveCharacters(next)
-      return next
-    })
+    )
     setActiveCharacterId(characterId)
     saveActiveId(characterId)
   }, [])
@@ -250,11 +251,7 @@ export function useEve() {
       }).then(r => r.json()).then(data => {
         if (data.access_token) {
           const updated = { ...character, accessToken: data.access_token, expiresAt: Date.now() + (data.expires_in ?? 1199) * 1000 }
-          setCharacters(prev => {
-            const next = prev.map(c => c.characterId === character.characterId ? updated : c)
-            saveCharacters(next)
-            return next
-          })
+          setCharacters(prev => prev.map(c => c.characterId === character.characterId ? updated : c))
         }
       }).catch(() => {})
       return
@@ -267,11 +264,7 @@ export function useEve() {
       }).then(r => r.json()).then(data => {
         if (data.access_token) {
           const updated = { ...character, accessToken: data.access_token, expiresAt: Date.now() + (data.expires_in ?? 1199) * 1000 }
-          setCharacters(prev => {
-            const next = prev.map(c => c.characterId === character.characterId ? updated : c)
-            saveCharacters(next)
-            return next
-          })
+          setCharacters(prev => prev.map(c => c.characterId === character.characterId ? updated : c))
         }
       }).catch(() => {})
     }, msUntilRefresh)
@@ -478,11 +471,7 @@ export function useEve() {
       // ── Wallet ───────────────────────────────────────────────────────────
       if (balanceRes.status === 'fulfilled') {
         if (isActive) setWalletBalance(balanceRes.value)
-        setAllWalletBalances(prev => {
-          const next = { ...prev, [id]: balanceRes.value }
-          saveWalletCache(next)
-          return next
-        })
+        setAllWalletBalances(prev => ({ ...prev, [id]: balanceRes.value }))
       }
 
       if (journalRes.status === 'fulfilled') {
@@ -831,11 +820,7 @@ export function useEve() {
         // Update character with alliance ID if present
         if (publicRes.value.alliance_id) {
           const allianceId = publicRes.value.alliance_id
-          setCharacters(prev => {
-            const next = prev.map(c => c.characterId === char.characterId ? { ...c, allianceId } : c)
-            saveCharacters(next)
-            return next
-          })
+          setCharacters(prev => prev.map(c => c.characterId === char.characterId ? { ...c, allianceId } : c))
         }
       }
 
@@ -880,13 +865,11 @@ export function useEve() {
           .then(r => r.json())
           .then((resolved: { id: number; name: string }[]) => {
             if (!resolved.length) return
-            resolved.forEach(({ id, name }) =>
-              fetch('/api/structures', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ id, name }),
-              }).catch(() => {})
-            )
+            fetch('/api/structures', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(resolved.map(({ id, name }) => ({ id, name }))),
+            }).catch(() => {})
             const nameMap = new Map(resolved.map(r => [r.id, r.name]))
             const patchLoc = (a: EveAsset) => {
               let loc = a.locationName
@@ -960,23 +943,40 @@ export function useEve() {
   // Lightweight refresh for non-active characters — only the data needed for merged panel views.
   // Avoids firing 26 ESI calls per alt and overwhelming the error budget.
   const refreshCharacterLight = useCallback(async (char: EveCharacter) => {
-    const token = char.accessToken
+    let token = char.accessToken
     const id = char.characterId
 
-    // Quick auth check — if the token is dead, drop the character rather than spamming 401s
+    // Quick auth check — try to refresh the token if expired before deciding the character is dead
     try {
       const probe = await fetch(`https://esi.evetech.net/latest/characters/${id}/wallet/`, {
         headers: { Authorization: `Bearer ${token}` },
       })
       if (probe.status === 401) {
-        setCharacters(prev => {
-          const next = prev.filter(c => c.characterId !== id)
-          saveCharacters(next)
-          return next
-        })
-        return
+        // Access token expired — try to get a new one via the refresh token
+        try {
+          const refreshRes = await fetch('/api/eve/refresh', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ refresh_token: char.refreshToken }),
+          })
+          const refreshData = await refreshRes.json()
+          if (refreshData.access_token) {
+            // Update the stored token so future calls use it
+            const updatedChar = { ...char, accessToken: refreshData.access_token, expiresAt: Date.now() + (refreshData.expires_in ?? 1199) * 1000 }
+            setCharacters(prev => prev.map(c => c.characterId === id ? updatedChar : c))
+            // Continue the light refresh with the new token
+            token = refreshData.access_token
+          } else {
+            // Refresh token also invalid — character session is revoked, drop it
+            setCharacters(prev => prev.filter(c => c.characterId !== id))
+            return
+          }
+        } catch {
+          // Network error during refresh — skip rather than dropping the character
+          return
+        }
       }
-    } catch { /* network error — skip silently */ }
+    } catch { /* network error on probe — skip silently */ }
 
     const [balanceRes, journalRes, txRes, assetsRes, jobsRes, ordersRes] = await Promise.allSettled([
       getWalletBalance(id, token),
@@ -988,11 +988,7 @@ export function useEve() {
     ])
 
     if (balanceRes.status === 'fulfilled') {
-      setAllWalletBalances(prev => {
-        const next = { ...prev, [id]: balanceRes.value }
-        saveWalletCache(next)
-        return next
-      })
+      setAllWalletBalances(prev => ({ ...prev, [id]: balanceRes.value }))
     }
     if (journalRes.status === 'fulfilled') {
       const mapped = journalRes.value.slice(0, 50).map(e => ({

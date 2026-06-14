@@ -19,21 +19,6 @@ const FIELDS: Field[] = [
     type: 'password',
   },
   {
-    key: 'EVE_CLIENT_ID',
-    label: 'EVE Client ID',
-    placeholder: 'abc123...',
-    required: true,
-    hint: 'developers.eveonline.com → Your Application',
-  },
-  {
-    key: 'EVE_CLIENT_SECRET',
-    label: 'EVE Client Secret',
-    placeholder: 'eat_...',
-    required: true,
-    hint: 'developers.eveonline.com → Your Application',
-    type: 'password',
-  },
-  {
     key: 'ELEVENLABS_API_KEY',
     label: 'ElevenLabs API Key',
     placeholder: 'sk_...',
@@ -60,15 +45,17 @@ export default function SetupScreen({ missingKeys, onComplete }: Props) {
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
   const [revealed, setRevealed] = useState<Record<string, boolean>>({})
+  const [skipAI, setSkipAI] = useState(false)
 
   useEffect(() => {
     window.electronAPI?.getEnvValues().then(existing => {
       setValues(existing)
+      if (existing['AURORA_NO_AI'] === 'true') setSkipAI(true)
     })
   }, [])
 
-  const requiredFields = FIELDS.filter(f => f.required)
-  const optionalFields = FIELDS.filter(f => !f.required)
+  const requiredFields = FIELDS.filter(f => f.required && !skipAI)
+  const optionalFields = FIELDS.filter(f => !f.required || (f.required && skipAI))
   const stillMissing = requiredFields.filter(f => !values[f.key]?.trim())
 
   async function handleSave() {
@@ -78,7 +65,8 @@ export default function SetupScreen({ missingKeys, onComplete }: Props) {
     }
     setSaving(true)
     setError('')
-    const remaining = await window.electronAPI!.saveEnvValues(values)
+    const saveValues = { ...values, AURORA_NO_AI: skipAI ? 'true' : 'false' }
+    const remaining = await window.electronAPI!.saveEnvValues(saveValues)
     setSaving(false)
     if (remaining.length === 0) {
       onComplete()
@@ -94,7 +82,7 @@ export default function SetupScreen({ missingKeys, onComplete }: Props) {
         <div className="flex items-center justify-between">
           <label className="text-[11px] tracking-widest text-eve-cyan/80 uppercase">
             {field.label}
-            {field.required && <span className="text-eve-red ml-1">*</span>}
+            {field.required && !skipAI && <span className="text-eve-red ml-1">*</span>}
           </label>
           <span className="text-[10px] text-eve-dim">{field.hint}</span>
         </div>
@@ -123,7 +111,6 @@ export default function SetupScreen({ missingKeys, onComplete }: Props) {
 
   return (
     <div className="fixed inset-0 z-50 bg-eve-black flex items-center justify-center p-6">
-      {/* Corner brackets */}
       <div className="absolute top-4 left-4 w-6 h-6 border-t-2 border-l-2 border-eve-cyan/60" />
       <div className="absolute top-4 right-4 w-6 h-6 border-t-2 border-r-2 border-eve-cyan/60" />
       <div className="absolute bottom-4 left-4 w-6 h-6 border-b-2 border-l-2 border-eve-cyan/60" />
@@ -141,16 +128,45 @@ export default function SetupScreen({ missingKeys, onComplete }: Props) {
           <div className="h-px bg-gradient-to-r from-transparent via-eve-cyan/30 to-transparent mt-3" />
         </div>
 
-        {/* Required fields */}
-        <div className="eve-panel p-4 space-y-4">
-          <div className="text-[10px] tracking-widest text-eve-muted uppercase mb-2">Required</div>
-          {requiredFields.map(renderField)}
+        {/* AI mode toggle */}
+        <div className="eve-panel p-4">
+          <label className="flex items-start gap-3 cursor-pointer select-none">
+            <div className="relative mt-0.5 shrink-0">
+              <input
+                type="checkbox"
+                className="sr-only"
+                checked={skipAI}
+                onChange={e => setSkipAI(e.target.checked)}
+              />
+              <div className={`w-4 h-4 border transition-colors flex items-center justify-center ${skipAI ? 'border-eve-cyan bg-eve-cyan/20' : 'border-eve-border bg-eve-deep'}`}>
+                {skipAI && (
+                  <svg width="8" height="8" viewBox="0 0 8 8" fill="none" stroke="#00d4ff" strokeWidth="1.5">
+                    <polyline points="1,4 3,6 7,2" />
+                  </svg>
+                )}
+              </div>
+            </div>
+            <div>
+              <div className="text-[11px] tracking-widest text-eve-muted uppercase">Use without AI features</div>
+              <div className="text-[10px] text-eve-dim mt-0.5">
+                Skips Anthropic API key. EVE data, market tools, and all panels still work — AI chat and analysis will be unavailable.
+              </div>
+            </div>
+          </label>
         </div>
+
+        {/* Required fields */}
+        {!skipAI && (
+          <div className="eve-panel p-4 space-y-4">
+            <div className="text-[10px] tracking-widest text-eve-muted uppercase mb-2">Required</div>
+            {FIELDS.filter(f => f.required).map(renderField)}
+          </div>
+        )}
 
         {/* Optional fields */}
         <div className="eve-panel p-4 space-y-4">
           <div className="text-[10px] tracking-widest text-eve-muted uppercase mb-2">Optional</div>
-          {optionalFields.map(renderField)}
+          {FIELDS.filter(f => !f.required).map(renderField)}
         </div>
 
         {error && (

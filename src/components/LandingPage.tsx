@@ -509,7 +509,54 @@ function ageLabel(isoTs: string): string {
   return `${Math.floor(secs / 3600)}h`
 }
 
-function IntelFeed({ channel }: { channel: string }) {
+const INTEL_CHANNEL_KEY = (characterId: number) => `aurora_intel_channel_${characterId}`
+
+function IntelFeedWithInput({ characterId, characterName }: { characterId: number; characterName: string }) {
+  const storageKey = INTEL_CHANNEL_KEY(characterId)
+  const [channel, setChannel] = useState<string>(
+    () => localStorage.getItem(storageKey) ?? ''
+  )
+  const [draft, setDraft] = useState(channel)
+
+  // Reset when character switches
+  useEffect(() => {
+    const saved = localStorage.getItem(storageKey) ?? ''
+    setChannel(saved)
+    setDraft(saved)
+  }, [storageKey])
+
+  const commit = () => {
+    const val = draft.trim().toLowerCase()
+    if (!val) return
+    localStorage.setItem(storageKey, val)
+    setChannel(val)
+  }
+
+  return (
+    <div className="flex flex-col gap-2 h-full">
+      <div className="flex items-center gap-1.5">
+        <input
+          className="eve-input flex-1 text-[9px] py-0.5 px-2 h-5"
+          placeholder="channel name (e.g. local)"
+          value={draft}
+          onChange={e => setDraft(e.target.value)}
+          onKeyDown={e => e.key === 'Enter' && commit()}
+        />
+        <button
+          className="eve-btn text-[9px] px-2 py-0.5 h-5"
+          onClick={commit}
+        >SET</button>
+      </div>
+      {channel ? (
+        <IntelFeed channel={channel} characterName={characterName} />
+      ) : (
+        <div className="text-eve-dim text-[9px] font-mono">Enter a channel name above.</div>
+      )}
+    </div>
+  )
+}
+
+function IntelFeed({ channel, characterName }: { channel: string; characterName?: string }) {
   const [entries, setEntries] = useState<IntelEntry[]>([])
   const [channelName, setChannelName] = useState('')
   const [error, setError] = useState<string | null>(null)
@@ -518,7 +565,8 @@ function IntelFeed({ channel }: { channel: string }) {
 
   const fetchFeed = async () => {
     try {
-      const res = await fetch(`/api/intel/${encodeURIComponent(channel)}`)
+      const qs  = characterName ? `?listener=${encodeURIComponent(characterName)}` : ''
+      const res = await fetch(`/api/intel/${encodeURIComponent(channel)}${qs}`)
       const data = await res.json() as { channelName?: string; entries?: IntelEntry[]; error?: string }
       if (data.error) { setError(data.error); return }
       setChannelName(data.channelName ?? channel)
@@ -1179,7 +1227,7 @@ function CharacterShowcase(props: Omit<Props, 'character'> & { character: EveCha
           <div className="flex gap-3 min-h-0" style={{ height: 300 }}>
             {/* Intel feed */}
             <div className="flex flex-col gap-2 flex-1 min-w-0">
-              <IntelFeed channel="east.imperium" />
+              <IntelFeedWithInput characterId={character.characterId} characterName={character.characterName} />
             </div>
 
             {/* Contracts feed */}

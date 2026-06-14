@@ -11,6 +11,19 @@ protocol.registerSchemesAsPrivileged([
   { scheme: 'aurora', privileges: { secure: true, bypassCSP: true } }
 ])
 
+// Pass Google API key to Chromium so Web Speech API works in Electron.
+// Must be done before app.whenReady — process.env alone doesn't reach the renderer.
+{
+  const envPath = app.isPackaged
+    ? require('path').join(app.getPath('userData'), '.env')
+    : require('path').join(__dirname, '../.env')
+  try {
+    const raw = require('fs').readFileSync(envPath, 'utf-8') as string
+    const match = raw.match(/^GOOGLE_SPEECH_API_KEY=(.+)$/m)
+    if (match) app.commandLine.appendSwitch('google-api-key', match[1].trim())
+  } catch { /* .env not present yet — setup screen will handle it */ }
+}
+
 const isDev = process.env.NODE_ENV === 'development' || !app.isPackaged
 
 function log(msg: string) {
@@ -28,6 +41,11 @@ const envPath = isDev
   : join(app.getPath('userData'), '.env')
 
 const REQUIRED_KEYS = ['ANTHROPIC_API_KEY']
+
+function isNoAIMode(): boolean {
+  loadEnv()
+  return process.env.AURORA_NO_AI === 'true'
+}
 
 // App-level EVE credentials — shared across all users, created on developers.eveonline.com
 const EVE_CLIENT_ID     = '46e3ae80efea49d88caf2207c3ab62ac'
@@ -55,7 +73,8 @@ function loadEnv() {
 
 function getMissingKeys(): string[] {
   loadEnv()
-  return REQUIRED_KEYS.filter(k => !process.env[k])
+  const skip = isNoAIMode() ? ['ANTHROPIC_API_KEY'] : []
+  return REQUIRED_KEYS.filter(k => !skip.includes(k) && !process.env[k])
 }
 
 function readEnvValues(): Record<string, string> {
@@ -145,7 +164,7 @@ function createWindow() {
     height: 900,
     minWidth: 1024,
     minHeight: 700,
-    frame: true,
+    frame: false,
     autoHideMenuBar: true,
     backgroundColor: '#080b10',
     webPreferences: {
@@ -159,7 +178,7 @@ function createWindow() {
 
   // Grant microphone access for Web Speech API and getUserMedia
   mainWindow.webContents.session.setPermissionRequestHandler((_wc, permission, callback) => {
-    const allowed = ['media', 'microphone', 'audioCapture']
+    const allowed = ['media', 'microphone', 'audioCapture', 'speech-recognition', 'speechRecognition']
     callback(allowed.includes(permission))
   })
 
@@ -192,12 +211,18 @@ mainWindow.webContents.setWindowOpenHandler(({ url }) => {
     }
   })
 
-  mainWindow.on('maximize', () => mainWindow?.setFullScreen(true))
-  mainWindow.on('leave-full-screen', () => mainWindow?.unmaximize())
+  mainWindow.on('maximize', () => mainWindow?.webContents.send('window:maximizeChange', true))
+  mainWindow.on('unmaximize', () => mainWindow?.webContents.send('window:maximizeChange', false))
+  mainWindow.on('enter-full-screen', () => mainWindow?.webContents.send('window:fullScreenChange', true))
+  mainWindow.on('leave-full-screen', () => mainWindow?.webContents.send('window:fullScreenChange', false))
 
   globalShortcut.register('F11', () => {
     if (!mainWindow) return
     mainWindow.setFullScreen(!mainWindow.isFullScreen())
+  })
+
+  globalShortcut.register('Escape', () => {
+    if (mainWindow?.isFullScreen()) mainWindow.setFullScreen(false)
   })
 
   if (isDev) {
@@ -246,6 +271,22 @@ mainWindow.webContents.setWindowOpenHandler(({ url }) => {
     waitAndLoad()
   }
 
+  // Global PTT shortcut — only active when window is not focused to avoid double-fire
+  // with the in-window keydown handler. Key is configurable via ptt:setKey IPC.
+  let pttKey = '`'
+  const registerPtt = () => { try { globalShortcut.register(pttKey, () => mainWindow?.webContents.send('ptt:toggle')) } catch { /* invalid key */ } }
+  const unregisterPtt = () => { try { globalShortcut.unregister(pttKey) } catch { /* not registered */ } }
+
+  mainWindow.on('blur',  registerPtt)
+  mainWindow.on('focus', unregisterPtt)
+
+  ipcMain.handle('ptt:setKey', (_e, newKey: string) => {
+    const wasBlurred = !mainWindow?.isFocused()
+    if (wasBlurred) unregisterPtt()
+    pttKey = newKey
+    if (wasBlurred) registerPtt()
+  })
+
   mainWindow.on('closed', () => {
     globalShortcut.unregisterAll()
     mainWindow = null
@@ -284,7 +325,8 @@ ipcMain.on('update:install', () => autoUpdater.quitAndInstall())
 ipcMain.on('window:minimize', () => mainWindow?.minimize())
 ipcMain.on('window:maximize', () => {
   if (!mainWindow) return
-  mainWindow.setFullScreen(!mainWindow.isFullScreen())
+  if (mainWindow.isMaximized()) mainWindow.unmaximize()
+  else mainWindow.maximize()
 })
 ipcMain.on('window:close', () => mainWindow?.close())
 ipcMain.handle('window:captureScreenshot', async () => {
@@ -293,6 +335,17 @@ ipcMain.handle('window:captureScreenshot', async () => {
   return image.toPNG().toString('base64')
 })
 ipcMain.handle('window:isMaximized', () => mainWindow?.isMaximized() ?? false)
+ipcMain.handle('window:isFullScreen', () => mainWindow?.isFullScreen() ?? false)
+ipcMain.handle('config:noAIMode', () => isNoAIMode())
+ipcMain.handle('setup:clearKeys', (_e, keys: string[], setNoAI = false) => {
+  const existing = readEnvValues()
+  for (const k of keys) delete existing[k]
+  if (setNoAI) existing['AURORA_NO_AI'] = 'true'
+  writeEnvValues(existing)
+  loadEnv()
+  app.relaunch()
+  app.exit(0)
+})
 
 // ── Setup / env IPC ───────────────────────────────────────────────────────
 ipcMain.handle('setup:getMissing', () => getMissingKeys())
