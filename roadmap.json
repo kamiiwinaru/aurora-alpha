@@ -1,20 +1,8 @@
 [
   {
-    "id": "aurora-landing-listen-bug",
-    "title": "Aurora Landing Screen — Voice Input Bug",
-    "status": "planned",
-    "category": "Bug Fixes",
-    "description": "On the landing screen, Aurora glows gold when listening but shows no visual feedback for an incoming query and never dispatches it.",
-    "notes": [
-      "Orb glow triggers correctly — mic activation works",
-      "Query text does not appear / interim transcript not surfacing to UI",
-      "Final transcript never sent — investigate submit path from landing screen vs. main chat"
-    ]
-  },
-  {
     "id": "intel-audio-fix",
     "title": "Intel Tool — Audio Alert Bug Fix",
-    "status": "planned",
+    "status": "done",
     "category": "Bug Fixes",
     "description": "Audio alerts do not fire when intel is reported within 5 jumps in live use, despite working correctly in isolated tests.",
     "notes": [
@@ -182,7 +170,7 @@
     "id": "0d86550e-bf94-42a5-8cdc-4f700297af34",
     "title": "Alpha Tester Feedback Tool",
     "description": "In-app feedback submission tool for alpha testers to report bugs, suggest improvements, and rate their experience without leaving the Aurora interface.",
-    "status": "planned",
+    "status": "done",
     "category": "General",
     "notes": [
       "Simple form or floating button accessible at all times",
@@ -203,6 +191,276 @@
       "Expiry options under consideration",
       "Format support (EFT/ESI) under consideration",
       "ACL/per-user access control under consideration"
+    ]
+  },
+  {
+    "id": "70265313-dd7a-44dd-9fa9-70ecf3530499",
+    "title": "Character / Corporation Lookup",
+    "description": "Allow Aurora to look up EVE pilot profiles including corporation, alliance, security status, and standings by character name. Useful for real-time intel validation during hostile contact reports.",
+    "status": "planned",
+    "category": "EVE Data",
+    "notes": [
+      "Query by character name or ID",
+      "Return corp, alliance, security status, and standings",
+      "Cross-reference with pilot's own standings for blue/red/neutral flag",
+      "Useful for intel callouts and contact verification",
+      "ESI supports this natively — no auth required for basic affiliation data",
+      "Key endpoints: /characters/{character_id}/ (name, corp, alliance, sec status), /characters/affiliation/ (bulk lookup up to 1000 IDs — best for real-time intel), /corporations/{corporation_id}/ (corp name, ticker, alliance, member count, CEO), /alliances/{alliance_id}/ (alliance name, ticker, executor corp), /characters/search/ (name string → character ID)",
+      "Bulk affiliation endpoint is the optimal path for live intel drops"
+    ]
+  },
+  {
+    "id": "ae1e65a2-b879-426d-baa3-ae73907e80ad",
+    "title": "Appraisal Panel — Arcade Graph Scoped to Selected Items",
+    "description": "Adjust the appraisal panel so that the arcade/price graphs only display data for the items currently selected by the user, rather than rendering graphs for every item in the appraisal list. This improves clarity and reduces visual noise when working with large appraisals.",
+    "status": "planned",
+    "category": "EVE Data"
+  },
+  {
+    "id": "13ee1589-a414-49cb-99ae-87d2e41b0602",
+    "title": "Planetary Industry Panel",
+    "description": "Add a dedicated Planetary Industry panel to Aurora, providing visibility into PI colonies, extraction cycles, production chains, and planetary commodity management.",
+    "status": "planned",
+    "category": "EVE Data"
+  },
+  {
+    "id": "d28ba5e5-7a83-4fb4-b964-daa6c5c81bf6",
+    "title": "Loot Appraisal Tool",
+    "description": "A dedicated tool for appraising loot drops, allowing pilots to quickly assess the value of salvage, drops, and collected items in bulk.",
+    "status": "planned",
+    "category": "EVE Data"
+  },
+  {
+    "id": "bd9f7136-f5bf-4bd3-a408-c9b24d5557de",
+    "title": "Character Lookup & Kill/Loss Report Panel",
+    "description": "A panel for looking up EVE Online characters displaying corporation, alliance, security status, and standings. Integrated kill and loss report functionality pulls zKillboard data for the pilot, any looked-up character, or corporation — showing recent kills, losses, ship types destroyed, and ISK efficiency.",
+    "status": "planned",
+    "category": "EVE Data",
+    "notes": [
+      "Query by character name or ID",
+      "Return corp, alliance, security status, and standings",
+      "Cross-reference with pilot's own standings for blue/red/neutral flag",
+      "Integrate zKillboard API for kill/loss history per character or corp",
+      "Display recent kills, losses, ship types, ISK destroyed/lost, and efficiency rating",
+      "Useful for intel callouts — quickly assess if a contact is a known PvPer",
+      "ESI endpoints: /characters/{id}/, /characters/affiliation/, /corporations/{id}/, /alliances/{id}/",
+      "zKillboard API: /api/kills/characterID/{id}/ and /api/losses/characterID/{id}/"
+    ]
+  },
+  {
+    "id": "ede1c899-eae5-4c02-b826-c3a920108665",
+    "title": "Fleet Composition Tool",
+    "description": "Pull live fleet data from ESI to display current fleet members, ship types, wing/squad assignments, and roles. Designed primarily for FCs — requires fleet boss status for full member visibility. Line members see a limited view confirming fleet membership only.",
+    "status": "planned",
+    "category": "EVE Data",
+    "notes": [
+      "ESI scope: esi-fleets.read_fleet.v1",
+      "Fleet boss required for full member list — detect on load and adjust view accordingly",
+      "Resolve ship type IDs and character names via ESI for display",
+      "Show wing/squad structure, roles (FC, WC, SC, member), and current system per member",
+      "Line member fallback view: confirm fleet membership, show own role only",
+      "Potential extension: ship role classifier (DPS/logi/ewar/tackle) based on ship type"
+    ]
+  },
+  {
+    "id": "425f0a6e-0eb8-435c-841a-1a424316122f",
+    "title": "Wallet Goal & ISK Target Tracker",
+    "description": "Allow the pilot to set an ISK savings goal (e.g. save for a Rorqual, fund a doctrine ship) and track progress against current wallet balance and historical ISK flow. Shows projected time-to-goal based on recent earn rate.",
+    "status": "planned",
+    "category": "EVE Data",
+    "notes": [
+      "Set a named goal with a target ISK amount",
+      "Track current wallet balance vs. target — show progress bar and delta",
+      "Calculate average daily ISK income from wallet journal history",
+      "Project time-to-goal based on recent earn rate",
+      "Support multiple concurrent goals",
+      "Optional: alert when goal is reached"
+    ]
+  },
+  {
+    "id": "b888fcb4-a655-48e7-a711-3054b8a61d98",
+    "title": "Build vs. Buy Advisor",
+    "description": "A dedicated UI flow within the Blueprint Analyzer panel that automatically orchestrates blueprint checking, material cost appraisal, and market price comparison to produce a build vs. buy recommendation for any item or fit.",
+    "status": "planned",
+    "category": "EVE Data",
+    "notes": [
+      "Integrate into the existing Blueprint Analyzer panel as an additional mode",
+      "Blueprint check via query_industry to detect owned BPO/BPC and ME/TE",
+      "Material cost calculated via calculate_blueprint + appraise_items on inputs at Jita buy price",
+      "Market price via appraise_items on finished item at Jita sell price",
+      "Side-by-side comparison output: manufacture cost vs. buy cost, margin, and recommendation",
+      "Batch mode — process entire fits at once",
+      "Break-even ME calculator — show at what ME level manufacturing beats buying",
+      "Structure/rig toggle — factor in Raitaru, Azbel, Sotiyo bonuses vs. station"
+    ]
+  },
+  {
+    "id": "5e6a6b6d-acca-437a-8bae-be65a0b8b140",
+    "title": "LP Store Optimizer",
+    "description": "Ranks LP store redemption options by ISK/LP ratio across all of the pilot's LP wallets. Pulls public LP store offers via ESI (no auth required for store data), appraises outputs at Jita market prices, and calculates net ISK per LP spent to identify the best redemption targets.",
+    "status": "planned",
+    "category": "EVE Data",
+    "notes": [
+      "LP store offers endpoint is fully public — no auth scope needed, cache aggressively and keep local",
+      "Only auth required: esi-characters.read_loyalty.v1 for pilot LP balances",
+      "Cache LP store offer lists locally — they change infrequently, no need to hit ESI every load",
+      "Cross-reference with appraise_items / market data for sell price calculation",
+      "Sort output by ISK/LP ratio descending — highlight top 5 per store",
+      "SoE and Paragon stores likely highest value given pilot's current LP balances"
+    ]
+  },
+  {
+    "id": "e0f2fe6e-17d5-4cf9-bdad-c1453c5094ec",
+    "title": "Fix Toggle Full Screen Button",
+    "description": "The toggle full screen button does not correctly switch the application to windowed mode. Clicking it keeps the app in full screen and the window cannot be resized.",
+    "status": "done",
+    "category": "Bug Fixes",
+    "notes": [
+      "Button toggles visually but window remains full screen",
+      "Resize handles unavailable after toggle",
+      "Expected: clicking toggle exits full screen and restores resizable windowed mode"
+    ]
+  },
+  {
+    "id": "5484ea16-43ad-4031-80ea-cac7d9b447a4",
+    "title": "Agent Finder via ESI",
+    "description": "Integrate EVE ESI agent data to allow pilots to query agents by corporation, division, level, and security status. Should support filtering by nearest location and sorting by jump distance from current position.",
+    "status": "consideration",
+    "category": "EVE Data",
+    "notes": [
+      "Check ESI /universe/stations/ and /agents/ endpoints for agent data availability",
+      "Filter by corporation (e.g. Ministry of War), agent level, division, and security status",
+      "Sort results by jump distance from pilot's current location using plan_route",
+      "ESI may not expose full agent database — fallback to static data dump (SDE) if needed",
+      "Surface closest + highest quality agent as primary result"
+    ]
+  },
+  {
+    "id": "1ebbb966-7d89-4c40-aba5-cf6c912f3968",
+    "title": "SDE: Dogma Attributes & Effects",
+    "description": "Integrate SDE dogma attributes and effects data — module effect formulas, stacking penalties, resist profiles — for more accurate fitting sim calculations including cap, resists, and damage.",
+    "status": "planned",
+    "category": "EVE Data"
+  },
+  {
+    "id": "1f0b27ce-b1be-4cae-847d-2041fcd439ef",
+    "title": "SDE: NPC Agents",
+    "description": "Integrate SDE NPC agent data — agent name, level, division, corporation, and station — to support the Agent Finder feature and serve as ESI fallback for agent lookups.",
+    "status": "planned",
+    "category": "EVE Data"
+  },
+  {
+    "id": "082cd697-2b0d-4164-a8fc-6a2036f69d81",
+    "title": "SDE: NPC Corporations & Factions",
+    "description": "Integrate SDE NPC corporation and faction hierarchy data — home stations, standings effects, faction/corp relationships — to support standing loss/gain modelling and agent mission planning.",
+    "status": "planned",
+    "category": "EVE Data"
+  },
+  {
+    "id": "67be983e-e48c-44b7-bca4-1e2e6fdbe3c5",
+    "title": "SDE: Certificate Tree",
+    "description": "Integrate SDE certificate tree data — skill to role to certificate groupings — to power a skill recommendation engine supporting \"what skills do I need for X role\" queries.",
+    "status": "planned",
+    "category": "EVE Data"
+  },
+  {
+    "id": "d8f26916-b92f-4028-bddd-421964b93181",
+    "title": "SDE: Item Traits & Bonuses",
+    "description": "Integrate SDE item traits and bonus data — ship role bonuses and trait descriptions — to display alongside fits in the fitting sim ship card.",
+    "status": "planned",
+    "category": "EVE Data"
+  },
+  {
+    "id": "7efebb3e-3eab-4ae2-b3f6-331d6e9f6a34",
+    "title": "SDE: Graphic & Render Metadata",
+    "description": "Integrate SDE graphic and render metadata — 3D model references and icon IDs — to enable item icons and visual assets throughout the UI.",
+    "status": "planned",
+    "category": "EVE Data"
+  },
+  {
+    "id": "621c5ed1-60ee-4196-927f-7b4dca099b10",
+    "title": "SDE: Wormhole Statics",
+    "description": "Integrate SDE wormhole static data to build a suite of wormhole tools for pilots operating in or around J-space.",
+    "status": "planned",
+    "category": "EVE Data",
+    "notes": [
+      "Wormhole type lookup — pilot inputs hole ID (e.g. C247, K162) and gets full stats: class, static connections, mass limit, jump mass limit, lifetime, and wormhole effect",
+      "Intel Tool integration — when a WH system is identified, auto-display its class, statics, and effect alongside existing intel data",
+      "Mass calculator — given a ship or list of ships, calculate total mass and how many jumps remain before hole collapse based on hole mass limit",
+      "Mass-to-close calculator — determine what it would take to intentionally collapse the hole: account for jump drive mass (both directions count), ship hull mass, and number of entries needed to reach the total mass limit",
+      "Route planning excluded — static SDE data only; live hole locations would require ESI or manual pilot input and are out of scope"
+    ]
+  },
+  {
+    "id": "bb910408-d819-412f-8ee5-5b23f3104059",
+    "title": "SDE: Sovereignty Structures",
+    "description": "Integrate SDE sovereignty structure data — TCU and IHub data tied to systems — to support a sovereignty map feature.",
+    "status": "planned",
+    "category": "EVE Data"
+  },
+  {
+    "id": "145e4c7f-c1d8-4b7d-a53e-425e6f16dcb0",
+    "title": "SDE: Planetary Schematics",
+    "description": "Integrate SDE planetary schematics — PI input/output chains, cycle times, and volumes — required for accurate PI Panel functionality. This data is essential and cannot be omitted from the PI feature.",
+    "status": "planned",
+    "category": "EVE Data"
+  },
+  {
+    "id": "43e2b776-63c6-46e2-b387-47f4386bb98c",
+    "title": "SDE: Reaction Formulas",
+    "description": "Integrate SDE reaction formula data — T2 and T3 reaction inputs and outputs — to support a reaction industry planning feature.",
+    "status": "planned",
+    "category": "EVE Data"
+  },
+  {
+    "id": "84ea10fc-0cdf-484d-a622-9c50106bd306",
+    "title": "EVE Agent Finder via ESI/SDE",
+    "description": "Allow pilots to search for NPC agents by corporation, division, level, and security status. Show nearest agents to current location with jump count. Data likely available via the SDE static dump (agents table) even if not directly via ESI.",
+    "status": "consideration",
+    "category": "EVE Data",
+    "notes": [
+      "Confirm whether ESI exposes agent data or if SDE-only",
+      "Filter by corp, division, level, sec status",
+      "Sort by distance/jumps from current location",
+      "Triggered by pilot asking for nearest Ministry of War agent"
+    ]
+  },
+  {
+    "id": "922911b9-45a5-4ddd-ab48-6e635ac63bb2",
+    "title": "Nearest Station by Service Type",
+    "description": "Allow pilots to query the nearest NPC station offering a specific service (clone bay, repair, reprocessing, factory, etc.) from their current location or any named system. Data available via SDE station tables which include service flags.",
+    "status": "consideration",
+    "category": "EVE Data",
+    "notes": [
+      "SDE staStations table includes service bitmask",
+      "Services include: clone bay, repair, factory, reprocessing, insurance, etc.",
+      "Return nearest N stations with jump count and route option",
+      "Triggered by pilot asking for nearest clone bay to Yanuel"
+    ]
+  },
+  {
+    "id": "322f05b7-1f8e-4546-b235-a8440282aa63",
+    "title": "Agent Finder & Station Services Lookup",
+    "description": "Allow pilots to query NPC agents by corp/faction/level/type and find nearest stations by service type (clone bay, repair, reprocessing, etc.) relative to their current location or any named system. Data sourced from ESI and/or SDE static dump.",
+    "status": "consideration",
+    "category": "EVE Data",
+    "notes": [
+      "ESI may expose agent data — verify endpoint coverage",
+      "SDE static dump has station service flags including clone bays",
+      "Use cases: nearest Ministry of War agent, nearest clone bay to X system",
+      "Route integration — return jump count from origin system"
+    ]
+  },
+  {
+    "id": "3dcf054a-e72a-433c-9e3e-8d78e25ac373",
+    "title": "Nearest Station by Service Type",
+    "description": "Allow pilots to query for the nearest NPC station offering a specific service (clone bay, repair, reprocessing, etc.) from their current location or any given system. Data sourced from the SDE station tables which include service flags.",
+    "status": "consideration",
+    "category": "EVE Data",
+    "notes": [
+      "SDE station tables include service flags for clone bay, repair, factory, etc.",
+      "Could also fold in agent finder since same data source",
+      "Useful for null/low-sec pilots finding nearest highsec services"
     ]
   }
 ]
