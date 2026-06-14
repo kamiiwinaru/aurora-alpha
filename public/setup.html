@@ -206,7 +206,7 @@
 
       <div class="field">
         <div class="field-header">
-          <label class="field-label">Anthropic API Key<span class="req">*</span></label>
+          <label class="field-label">Anthropic API Key<span class="req" id="apiKeyReq">*</span></label>
           <span class="field-hint">console.anthropic.com → API Keys</span>
         </div>
         <div class="input-wrap">
@@ -214,21 +214,17 @@
           <button class="toggle-btn" onclick="toggle('ANTHROPIC_API_KEY', this)">SHOW</button>
         </div>
       </div>
+
+      <div class="field" style="margin-top: 4px;">
+        <label style="display:flex;align-items:center;gap:8px;cursor:pointer;user-select:none;">
+          <input type="checkbox" id="noAIMode" onchange="toggleNoAI()" style="width:auto;padding:0;accent-color:var(--gold);" />
+          <span style="font-size:10px;letter-spacing:0.15em;color:var(--gold);">No AI Mode — skip Anthropic key, EVE data tools only</span>
+        </label>
+      </div>
     </div>
 
     <div class="panel">
       <div class="panel-label">Optional</div>
-
-      <div class="field">
-        <div class="field-header">
-          <label class="field-label">Google Speech API Key</label>
-          <span class="field-hint">Enables voice input · console.cloud.google.com</span>
-        </div>
-        <div class="input-wrap">
-          <input id="GOOGLE_SPEECH_API_KEY" type="password" placeholder="AIza..." autocomplete="off" />
-          <button class="toggle-btn" onclick="toggle('GOOGLE_SPEECH_API_KEY', this)">SHOW</button>
-        </div>
-      </div>
 
       <div class="field">
         <div class="field-header">
@@ -258,7 +254,17 @@
   </div>
 
   <script>
-    const REQUIRED = ['ANTHROPIC_API_KEY']
+    let noAIMode = false
+
+    function toggleNoAI() {
+      noAIMode = document.getElementById('noAIMode').checked
+      const keyInput = document.getElementById('ANTHROPIC_API_KEY')
+      const req      = document.getElementById('apiKeyReq')
+      keyInput.disabled = noAIMode
+      keyInput.style.opacity = noAIMode ? '0.35' : '1'
+      req.style.display = noAIMode ? 'none' : ''
+      updateBtn()
+    }
 
     // Pre-populate from existing .env values if any
     window.addEventListener('DOMContentLoaded', async () => {
@@ -266,7 +272,7 @@
         const existing = await window.electronAPI.getEnvValues()
         for (const [k, v] of Object.entries(existing)) {
           const el = document.getElementById(k)
-          if (!el) continue
+          if (!el || el.type === 'checkbox') continue
           if (v === '••••configured••••') {
             el.placeholder = 'already configured — leave blank to keep'
           } else if (v) {
@@ -284,7 +290,11 @@
     }
 
     function updateBtn() {
-      const missing = REQUIRED.filter(k => !document.getElementById(k).value.trim())
+      const required = noAIMode ? [] : ['ANTHROPIC_API_KEY']
+      const missing = required.filter(k => {
+        const el = document.getElementById(k)
+        return !el.value.trim() && el.placeholder !== 'already configured — leave blank to keep'
+      })
       document.getElementById('submitBtn').disabled = missing.length > 0
     }
 
@@ -294,13 +304,19 @@
     async function handleSave() {
       const values = {}
       document.querySelectorAll('input[id]').forEach(el => {
+        if (el.type === 'checkbox') return
         if (el.value.trim()) values[el.id] = el.value.trim()
       })
 
-      const missing = REQUIRED.filter(k => !values[k])
-      if (missing.length > 0) {
-        document.getElementById('error').textContent = 'Required: ' + missing.join(', ')
-        return
+      if (noAIMode) {
+        values['AURORA_NO_AI'] = 'true'
+      } else {
+        const hasKey = values['ANTHROPIC_API_KEY'] ||
+          document.getElementById('ANTHROPIC_API_KEY').placeholder === 'already configured — leave blank to keep'
+        if (!hasKey) {
+          document.getElementById('error').textContent = 'Required: ANTHROPIC_API_KEY'
+          return
+        }
       }
 
       document.getElementById('submitBtn').disabled = true

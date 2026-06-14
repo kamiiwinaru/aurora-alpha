@@ -3114,20 +3114,19 @@ app.get('/api/intel-auto', (req, res) => {
       .map(f => ({ name: f, mtime: statSync(join(CHATLOG_DIR, f)).mtimeMs }))
       .sort((a, b) => b.mtime - a.mtime)
 
-    if (listener) files = files.filter(({ name }) => matchesListener(name))
-
     // Always include the 3 freshest logs (auto-discovery) + any watched channel files
     const seen      = new Set<string>()
     const selected: typeof files = []
 
-    // 1. Top-3 by recency
-    for (const f of files) {
+    // 1. Top-3 by recency — filtered to this character's listener if known
+    const listenerFiles = listener ? files.filter(({ name }) => matchesListener(name)) : files
+    for (const f of listenerFiles) {
       if (selected.length >= 3) break
       seen.add(f.name)
       selected.push(f)
     }
 
-    // 2. Watched channels — find the most recent file per channel name not already included
+    // 2. Watched channels — search ALL files (any listener) so alt-character intel logs are included
     for (const watchName of watchNames) {
       const match = files.find(f => !seen.has(f.name) && f.name.toLowerCase().startsWith(watchName))
       if (match) { seen.add(match.name); selected.push(match) }
