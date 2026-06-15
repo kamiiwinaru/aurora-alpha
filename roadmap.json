@@ -462,5 +462,18 @@
       "Could also fold in agent finder since same data source",
       "Useful for null/low-sec pilots finding nearest highsec services"
     ]
+  },
+  {
+    "id": "537f70a5-54d4-4030-aac0-1addfbe268b5",
+    "title": "Invention Planner",
+    "description": "An invention planning tool integrated into the Blueprint Planner. Helps capsuleers plan T2 invention runs by analysing available decryptors and recommending the optimal one based on desired outcome (ME, TE, run count, probability).",
+    "status": "planned",
+    "category": "EVE Data",
+    "notes": [
+      "Lives inside the Blueprint Planner UI",
+      "Suggests the best decryptor to use from the pilot's current inventory",
+      "Should factor in decryptor cost vs. outcome value (probability bonus, ME/TE/runs on resulting BPC)",
+      "Compare all applicable decryptors side-by-side including no-decryptor baseline"
+    ]
   }
 ]

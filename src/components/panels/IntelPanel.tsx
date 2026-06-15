@@ -687,127 +687,151 @@ export default function IntelPanel({ shipLocation, characterId, characterName, o
   const debugPollCountRef   = useRef(0)
   const setDebugPollRef     = useRef(setDebugPoll)
 
-  // seenIds baseline: entries present on first load never trigger alerts
-  const seenIdsRef       = useRef<Set<string>>(new Set())
+  // alertBaselineSet: entries received during bootstrap never trigger alerts
   const alertBaselineSet = useRef(false)
+  const esRef            = useRef<EventSource | null>(null)
 
-  // ── Stable server refresh — called on mount, on RELOAD, and by the interval
-  const refreshFromServer = useCallback(async (isInitial = false) => {
-    try {
-      const name       = characterNameRef.current
-      const openNames  = channelsRef.current.map(c => c.channelName).filter(Boolean) as string[]
-      const watchParam = openNames.length ? `&watch=${encodeURIComponent(openNames.join(','))}` : ''
-      const url        = name
-        ? `/api/intel-auto?listener=${encodeURIComponent(name)}${watchParam}`
-        : `/api/intel-auto${watchParam ? '?' + watchParam.slice(1) : ''}`
-      const res  = await fetch(url)
-      const data = await res.json() as RawLogs
-      if (!data.logs?.length) return
+  // ── Alert check — called for each new entry received via SSE ─────────────
+  const checkAlert = useCallback(async (entry: IntelEntry) => {
+    if (!alertBaselineSet.current || !alertsEnabledRef.current) return
+    if (Date.now() - entry.timestamp.getTime() > ALERT_MAX_AGE_MS) return
 
-      const now = new Date()
-      // Merge by channel name — preserves filter/settings, adds new windows for new channels
-      const current = [...channelsRef.current]
-      const byName  = new Map(current.map((c, i) => [c.channelName?.toLowerCase(), i]))
+    const systemsInMsg = new Set<string>()
+    SYSTEM_RE.lastIndex = 0
+    for (const m of entry.message.matchAll(SYSTEM_RE)) systemsInMsg.add(m[1])
+    for (const word of entry.message.split(/\W+/)) {
+      if (word.length >= 3 && EVE_SYSTEM_NAMES.has(word.toLowerCase())) systemsInMsg.add(word)
+    }
+    if (systemsInMsg.size === 0) return
 
-      const newEntries: IntelEntry[] = []
-      for (const log of data.logs) {
-        const key     = log.channelName?.toLowerCase()
-        const entries = parseEntries(log.entries)
-        const isNewChannel = !byName.has(key)
+    const extraCount = (entry.message.match(/\+(\d+)/) ?? [])[1]
+    const count      = extraCount ? parseInt(extraCount, 10) : undefined
+    const spans      = buildSpans(entry.message)
+    const characters = [...new Set(spans.filter(s => s.type === 'character').map(s => s.value))]
+    const ships      = [...new Set(spans.filter(s => s.type === 'ship').map(s => s.value))]
 
-        // New channels (including ones that appear after character name loads) always
-        // baseline their entries — never alert on first appearance of a channel.
-        const channelNewEntries = alertBaselineSet.current && !isNewChannel
-          ? entries.filter(e => !seenIdsRef.current.has(e.id))
-          : []
-        channelNewEntries.forEach(e => newEntries.push(e))
-        entries.forEach(e => seenIdsRef.current.add(e.id))
+    if (!effectiveOriginIdRef.current) {
+      const sys = [...systemsInMsg][0]
+      const now = Date.now()
+      if (sys && (now - (recentAlertedSys.get(sys.toLowerCase()) ?? 0)) < ALERT_COOLDOWN_MS) return
+      if (sys) recentAlertedSys.set(sys.toLowerCase(), now)
+      await playAlert({ urgency: 'mid', system: sys, count, characters, ships })
+      return
+    }
 
-        const hasNew = channelNewEntries.length > 0
-
-        if (!isNewChannel) {
-          const idx = byName.get(key)!
-          const newZ = hasNew ? ++topZRef.current : current[idx].zIndex
-          current[idx] = { ...current[idx], channelName: log.channelName, entries, lastLoaded: now, zIndex: newZ }
-        } else if (current.length < MAX_CHANNELS) {
-          // Auto-open new window for a channel we haven't seen before
-          current.push({ ...makeChannel(current.length), channelName: log.channelName, entries, lastLoaded: now, autoRefresh: true })
-          byName.set(key, current.length - 1)
-        }
-      }
-      // Keep React topZ state in sync after any bumps
-      setTopZ(topZRef.current)
-
-      if (!alertBaselineSet.current) {
-        alertBaselineSet.current = true
-      } else if (newEntries.length && alertsEnabledRef.current) {
-        for (const entry of newEntries) {
-          if (Date.now() - entry.timestamp.getTime() > ALERT_MAX_AGE_MS) continue
-          const systemsInMsg = new Set<string>()
-          SYSTEM_RE.lastIndex = 0
-          for (const m of entry.message.matchAll(SYSTEM_RE)) systemsInMsg.add(m[1])
-          for (const word of entry.message.split(/\W+/)) {
-            if (word.length >= 3 && EVE_SYSTEM_NAMES.has(word.toLowerCase())) systemsInMsg.add(word)
-          }
-          if (systemsInMsg.size === 0) continue
-
-          const extraCount = (entry.message.match(/\+(\d+)/) ?? [])[1]
-          const count = extraCount ? parseInt(extraCount, 10) : undefined
-          const spans = buildSpans(entry.message)
-          const characters = [...new Set(spans.filter(s => s.type === 'character').map(s => s.value))]
-          const ships = [...new Set(spans.filter(s => s.type === 'ship').map(s => s.value))]
-
-          if (!effectiveOriginIdRef.current) {
-            const sys = [...systemsInMsg][0]
-            const now = Date.now()
-            if (sys && (now - (recentAlertedSys.get(sys.toLowerCase()) ?? 0)) < ALERT_COOLDOWN_MS) break
-            if (sys) recentAlertedSys.set(sys.toLowerCase(), now)
-            await playAlert({ urgency: 'mid', system: sys, count, characters, ships })
-            break
-          }
-
-          for (const sysName of systemsInMsg) {
-            const destId = resolveSystemId(sysName)
-            if (!destId) continue
-            const jumps  = jumpsBetween(effectiveOriginIdRef.current, destId)
-            if (jumps !== null && jumps <= alertThresholdRef.current) {
-              const now = Date.now()
-              if ((now - (recentAlertedSys.get(sysName.toLowerCase()) ?? 0)) < ALERT_COOLDOWN_MS) break
-              recentAlertedSys.set(sysName.toLowerCase(), now)
-              await playAlert({ urgency: jumps <= 2 ? 'near' : 'mid', system: sysName, jumps, count, characters, ships })
-              break
-            }
-          }
-        }
-      }
-
-      debugPollCountRef.current++
-      setDebugPollRef.current({ n: debugPollCountRef.current, chans: current.length, newE: newEntries.length })
-      setChannels(current)
-      if (isInitial) setAutoLoadStatus(null)
-    } catch {
-      if (isInitial) {
-        setAutoLoadStatus('Could not reach server.')
-        setTimeout(() => setAutoLoadStatus(null), 4000)
+    for (const sysName of systemsInMsg) {
+      const destId = resolveSystemId(sysName)
+      if (!destId) continue
+      const jumps = jumpsBetween(effectiveOriginIdRef.current, destId)
+      if (jumps !== null && jumps <= alertThresholdRef.current) {
+        const now = Date.now()
+        if ((now - (recentAlertedSys.get(sysName.toLowerCase()) ?? 0)) < ALERT_COOLDOWN_MS) return
+        recentAlertedSys.set(sysName.toLowerCase(), now)
+        await playAlert({ urgency: jumps <= 2 ? 'near' : 'mid', system: sysName, jumps, count, characters, ships })
+        return
       }
     }
-  }, []) // stable — all volatile state read from refs
+  }, [])
 
-  // Auto-load on mount, then poll every 5 s
-  useEffect(() => {
-    refreshFromServer(true)
-    const id = setInterval(() => refreshFromServer(false), 5000)
-    return () => clearInterval(id)
-  }, [refreshFromServer])
-
-  // Manual RELOAD: clear windows, reset baseline, re-fetch
-  const autoLoadFromServer = useCallback(async () => {
-    setAutoLoadStatus('Loading logs...')
-    setChannels([])
-    seenIdsRef.current = new Set()
+  // ── Connect SSE stream — called on mount and on manual reload ────────────
+  const connectSSE = useCallback(() => {
+    if (esRef.current) { esRef.current.close(); esRef.current = null }
     alertBaselineSet.current = false
-    await refreshFromServer(true)
-  }, [refreshFromServer])
+    setAutoLoadStatus('Loading logs...')
+
+    const name      = characterNameRef.current
+    const openNames = channelsRef.current.map(c => c.channelName).filter(Boolean) as string[]
+    const params    = new URLSearchParams()
+    if (name) params.set('listener', name)
+    if (openNames.length) params.set('watch', openNames.join(','))
+
+    const es = new EventSource(`/api/intel-stream?${params}`)
+    esRef.current = es
+
+    es.addEventListener('bootstrap', (e) => {
+      const data = JSON.parse((e as MessageEvent).data) as { channelName: string; entries: RawEntry[] }
+      const entries = parseEntries(data.entries)
+      const now = new Date()
+      setChannels(prev => {
+        const current = [...prev]
+        const key     = data.channelName?.toLowerCase()
+        const byName  = new Map(current.map((c, i) => [c.channelName?.toLowerCase(), i]))
+        if (byName.has(key)) {
+          const idx = byName.get(key)!
+          current[idx] = { ...current[idx], channelName: data.channelName, entries, lastLoaded: now }
+        } else if (current.length < MAX_CHANNELS) {
+          current.push({ ...makeChannel(current.length), channelName: data.channelName, entries, lastLoaded: now, autoRefresh: true })
+        }
+        return current
+      })
+    })
+
+    es.addEventListener('ready', () => {
+      alertBaselineSet.current = true
+      setAutoLoadStatus(null)
+      debugPollCountRef.current = 0
+      setDebugPollRef.current(null)
+    })
+
+    es.addEventListener('entry', (e) => {
+      const raw = JSON.parse((e as MessageEvent).data) as { id: string; timestamp: string; character: string; message: string; category: string; channelName: string }
+      const entry: IntelEntry = {
+        id: raw.id,
+        timestamp: new Date(raw.timestamp),
+        character: raw.character,
+        message: raw.message,
+        category: raw.category as IntelEntry['category'],
+        spans: buildSpans(raw.message),
+      }
+
+      // Update channel display
+      setChannels(prev => {
+        const current = [...prev]
+        const key    = raw.channelName?.toLowerCase()
+        const byName = new Map(current.map((c, i) => [c.channelName?.toLowerCase(), i]))
+        const now    = new Date()
+        if (byName.has(key)) {
+          const idx  = byName.get(key)!
+          const newZ = ++topZRef.current
+          current[idx] = { ...current[idx], entries: [entry, ...current[idx].entries], lastLoaded: now, zIndex: newZ }
+        } else if (current.length < MAX_CHANNELS) {
+          current.push({ ...makeChannel(current.length), channelName: raw.channelName, entries: [entry], lastLoaded: now, autoRefresh: true })
+        }
+        return current
+      })
+      setTopZ(z => z + 1)
+
+      debugPollCountRef.current++
+      setDebugPollRef.current({ n: debugPollCountRef.current, chans: channelsRef.current.length, newE: 1 })
+
+      checkAlert(entry)
+    })
+
+    es.addEventListener('error', () => {
+      // EventSource auto-reconnects — nothing to do
+      setAutoLoadStatus(null)
+    })
+  }, [checkAlert])
+
+  // Connect on mount, disconnect on unmount
+  useEffect(() => {
+    connectSSE()
+    return () => { esRef.current?.close(); esRef.current = null }
+  }, [connectSSE])
+
+  // Reconnect when character name becomes available (SSE connected before login resolved)
+  const prevListenerRef = useRef<string | null | undefined>(undefined)
+  useEffect(() => {
+    if (characterName === prevListenerRef.current) return
+    prevListenerRef.current = characterName
+    if (esRef.current) connectSSE() // reconnect with updated listener param
+  }, [characterName, connectSSE])
+
+  // Manual RELOAD: reset state and reconnect
+  const autoLoadFromServer = useCallback(() => {
+    setChannels([])
+    connectSSE()
+  }, [connectSSE])
 
   return (
     <div className="flex-1 flex flex-col gap-2 min-h-0">

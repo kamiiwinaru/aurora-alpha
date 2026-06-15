@@ -334,6 +334,16 @@ ipcMain.handle('window:captureScreenshot', async () => {
   const image = await mainWindow.webContents.capturePage()
   return image.toPNG().toString('base64')
 })
+ipcMain.handle('window:readLog', () => {
+  try {
+    const logPath = join(app.getPath('userData'), 'aurora.log')
+    if (!existsSync(logPath)) return null
+    const contents = readFileSync(logPath, 'utf-8')
+    // Return last 200 lines to keep the attachment manageable
+    const lines = contents.split('\n')
+    return lines.slice(-200).join('\n')
+  } catch { return null }
+})
 ipcMain.handle('window:isMaximized', () => mainWindow?.isMaximized() ?? false)
 ipcMain.handle('window:isFullScreen', () => mainWindow?.isFullScreen() ?? false)
 ipcMain.handle('config:noAIMode', () => isNoAIMode())

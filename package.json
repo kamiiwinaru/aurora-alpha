@@ -1,6 +1,6 @@
 {
   "name": "aurora-alpha",
-  "version": "1.0.6",
+  "version": "1.0.7",
   "description": "Aurora Alpha — Capsuleer Intelligence System for EVE Online",
   "author": "Kami Iwinaru",
   "private": true,
@@ -21,7 +21,7 @@
     "appId": "com.aurora.eve",
     "productName": "Aurora Alpha",
     "directories": {
-      "output": "release"
+      "output": "C:\\aurora-release"
     },
     "files": [
       "dist/**/*",

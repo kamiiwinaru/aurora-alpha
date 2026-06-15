@@ -25,14 +25,14 @@ Aurora is a personal AI assistant for EVE Online pilots, built as a standalone W
 
 ## Installation
 
-1. Download **Aurora-Alpha-Setup-1.0.6.exe** from the [latest release](https://github.com/kamiiwinaru/aurora-alpha/releases/latest)
+1. Download **Aurora-Alpha-Setup-1.0.7.exe** from the [latest release](https://github.com/kamiiwinaru/aurora-alpha/releases/latest)
 2. Run the installer
 3. On first launch, enter your **Anthropic API key** ([get one here](https://console.anthropic.com))
 4. Log in with your EVE account via the EVE SSO button
 5. Start flying smarter
 
 > **ElevenLabs** API key is optional — only needed if you want Aurora to speak responses aloud.
-> **Google Speech API key** is optional — enables voice input in the desktop app. Without it, Vosk offline recognition is used as a fallback.
+> **No AI Mode** — Aurora can run without an Anthropic key if you only need EVE data tools (assets, market, intel, etc.).
 
 ---
 
@@ -73,7 +73,6 @@ Aurora checks for updates automatically on launch. When a new version is availab
 - [Anthropic Claude](https://www.anthropic.com/) (`claude-sonnet-4-6`)
 - [EVE ESI](https://esi.evetech.net/)
 - [ElevenLabs](https://elevenlabs.io/) (optional voice)
-- [Vosk](https://alphacephei.com/vosk/) (offline voice fallback)
 
 ---
 

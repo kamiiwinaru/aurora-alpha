@@ -65,8 +65,11 @@ function saveWalletCache(cache: Record<number, number>) {
   localStorage.setItem(WALLET_CACHE_KEY, JSON.stringify(cache))
 }
 
-// Shared type name cache across fetches
-const typeNameCache: Record<number, string> = {}
+// Shared type name cache — pre-populated from localStorage so ESI calls are
+// only needed for type IDs never seen before across any session.
+const typeNameCache: Record<number, string> = (() => {
+  try { return JSON.parse(localStorage.getItem('aurora_type_names') ?? '{}') } catch { return {} }
+})()
 
 // Run async tasks with at most `limit` concurrent in-flight at a time
 async function throttledAll<T>(tasks: (() => Promise<T>)[], limit: number): Promise<T[]> {
@@ -85,12 +88,10 @@ async function throttledAll<T>(tasks: (() => Promise<T>)[], limit: number): Prom
 async function resolveTypeNames(typeIds: number[]): Promise<Record<number, string>> {
   const uncached = [...new Set(typeIds)].filter(id => !typeNameCache[id])
   if (uncached.length) {
-    // Use ESI bulk endpoint first (supports type IDs)
     const bulk = await resolveIds(uncached)
     for (const [id, name] of Object.entries(bulk)) {
       typeNameCache[Number(id)] = name
     }
-    // Fall back to individual calls for any still missing, throttled to 5 concurrent
     const stillMissing = uncached.filter(id => !typeNameCache[id])
     await throttledAll(stillMissing.map(id => async () => {
       try {
@@ -98,9 +99,28 @@ async function resolveTypeNames(typeIds: number[]): Promise<Record<number, strin
         typeNameCache[id] = info.name
       } catch { typeNameCache[id] = `Type ${id}` }
     }), 5)
+    // Persist newly resolved names so future sessions skip ESI entirely
+    try { localStorage.setItem('aurora_type_names', JSON.stringify(typeNameCache)) } catch { /* storage full */ }
   }
   const result: Record<number, string> = {}
   for (const id of typeIds) result[id] = typeNameCache[id] ?? `Type ${id}`
+  return result
+}
+
+// NPC station name cache — persisted to localStorage; station names never change.
+const stationNameCache: Record<number, string> = (() => {
+  try { return JSON.parse(localStorage.getItem('aurora_station_names') ?? '{}') } catch { return {} }
+})()
+
+async function resolveStationNames(locationIds: number[]): Promise<Record<number, string>> {
+  const uncached = [...new Set(locationIds)].filter(id => !stationNameCache[id])
+  if (uncached.length) {
+    const resolved = await resolveIds(uncached)
+    for (const [id, name] of Object.entries(resolved)) stationNameCache[Number(id)] = name
+    try { localStorage.setItem('aurora_station_names', JSON.stringify(stationNameCache)) } catch { /* storage full */ }
+  }
+  const result: Record<number, string> = {}
+  for (const id of locationIds) result[id] = stationNameCache[id] ?? `Location ${id}`
   return result
 }
 
@@ -363,6 +383,11 @@ export function useEve() {
       if (assetsRes.status === 'fulfilled') {
         const rawAssets = assetsRes.value
 
+        // Load locally cached structure names — avoids ESI round-trip for known structures
+        const localStructureCache: Record<number, string> = (() => {
+          try { return JSON.parse(localStorage.getItem('aurora_structure_names') ?? '{}') } catch { return {} }
+        })()
+
         // Build item_id → raw asset map for container hierarchy resolution
         const itemMap = new Map(rawAssets.map(a => [a.item_id, a]))
 
@@ -383,7 +408,7 @@ export function useEve() {
 
         const [names, stationNames] = await Promise.all([
           resolveTypeNames(typeIds),
-          resolveIds(publicLocationIds),
+          resolveStationNames(publicLocationIds),
         ])
 
         // Fetch player-assigned custom names for containers/ships (esi-assets.read_assets.v1)
@@ -402,14 +427,15 @@ export function useEve() {
         }
 
         // Walk up the container chain to build a human-readable location string.
+        // Checks localStorage cache for player-owned structure IDs before falling back to "Location <ID>".
         // Depth-limited to 5 to guard against corrupt data cycles.
         function resolveLocation(locationId: number, locationType: string, depth = 0): string {
-          if (depth > 5) return stationNames[locationId] ?? `Location ${locationId}`
+          if (depth > 5) return stationNames[locationId] ?? localStructureCache[locationId] ?? `Location ${locationId}`
           if (locationType !== 'other' && locationType !== 'item') {
-            return stationNames[locationId] ?? `Location ${locationId}`
+            return stationNames[locationId] ?? localStructureCache[locationId] ?? `Location ${locationId}`
           }
           const container = itemMap.get(locationId)
-          if (!container) return stationNames[locationId] ?? `Location ${locationId}`
+          if (!container) return stationNames[locationId] ?? localStructureCache[locationId] ?? `Location ${locationId}`
           const containerLabel = customNames.get(locationId) ?? names[container.type_id] ?? `Item ${locationId}`
           const parentLabel = resolveLocation(container.location_id, container.location_type, depth + 1)
           return `${containerLabel} @ ${parentLabel}`
@@ -870,6 +896,13 @@ export function useEve() {
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify(resolved.map(({ id, name }) => ({ id, name }))),
             }).catch(() => {})
+            // Persist to localStorage so future refreshes resolve instantly without ESI
+            try {
+              const existing = JSON.parse(localStorage.getItem('aurora_structure_names') ?? '{}')
+              for (const { id, name } of resolved) existing[String(id)] = name
+              localStorage.setItem('aurora_structure_names', JSON.stringify(existing))
+            } catch { /* storage full — skip */ }
+
             const nameMap = new Map(resolved.map(r => [r.id, r.name]))
             const patchLoc = (a: EveAsset) => {
               let loc = a.locationName
@@ -1018,14 +1051,20 @@ export function useEve() {
       const stationLocationIds = [...new Set(rawAssets.filter(a => a.location_type !== 'other').map(a => a.location_id))]
       const publicLocationIds = stationLocationIds.filter(sid => sid <= 100_000_000_000)
       const typeIds = [...new Set(rawAssets.map(a => a.type_id))]
-      const [names, stationNames] = await Promise.all([resolveTypeNames(typeIds), resolveIds(publicLocationIds)])
+      const [names, stationNames] = await Promise.all([resolveTypeNames(typeIds), resolveStationNames(publicLocationIds)])
+      const altStructureCache: Record<number, string> = (() => {
+        try { return JSON.parse(localStorage.getItem('aurora_structure_names') ?? '{}') } catch { return {} }
+      })()
       function resolveLocation(locationId: number, locationType: string, depth = 0): string {
         if (depth > 5 || (locationType !== 'other' && locationType !== 'item'))
-          return stationNames[locationId] ?? `Location ${locationId}`
+          return stationNames[locationId] ?? altStructureCache[locationId] ?? `Location ${locationId}`
         const container = itemMap.get(locationId)
-        if (!container) return stationNames[locationId] ?? `Location ${locationId}`
+        if (!container) return stationNames[locationId] ?? altStructureCache[locationId] ?? `Location ${locationId}`
         return `${names[container.type_id] ?? `Item ${locationId}`} @ ${resolveLocation(container.location_id, container.location_type, depth + 1)}`
       }
+      const altStructureIds = [...new Set(
+        stationLocationIds.filter(sid => sid > 100_000_000_000)
+      )]
       const resolved = rawAssets.map(a => ({
         itemId: a.item_id, typeId: a.type_id, typeName: names[a.type_id],
         locationId: a.location_id, locationName: resolveLocation(a.location_id, a.location_type),
@@ -1035,8 +1074,39 @@ export function useEve() {
       fetch('/api/assets/sync', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ characterId: id, characterName: char.characterName, assets: resolved, structureIds: [] }),
+        body: JSON.stringify({ characterId: id, characterName: char.characterName, assets: resolved, structureIds: altStructureIds }),
       }).catch(() => {})
+
+      // Resolve player structure names for this alt using their own token
+      if (altStructureIds.length && char.accessToken) {
+        const idsParam = altStructureIds.join(',')
+        fetch(`/api/assets/structures?characterId=${id}&accessToken=${char.accessToken}&ids=${idsParam}`)
+          .then(r => r.json())
+          .then((resolved: { id: number; name: string }[]) => {
+            if (!resolved.length) return
+            fetch('/api/structures', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(resolved.map(({ id, name }) => ({ id, name }))),
+            }).catch(() => {})
+            try {
+              const existing = JSON.parse(localStorage.getItem('aurora_structure_names') ?? '{}')
+              for (const { id, name } of resolved) existing[String(id)] = name
+              localStorage.setItem('aurora_structure_names', JSON.stringify(existing))
+            } catch { /* storage full — skip */ }
+            const nameMap = new Map(resolved.map(r => [r.id, r.name]))
+            const patchLoc = (a: EveAsset) => {
+              let loc = a.locationName
+              for (const [sid, sname] of nameMap) loc = loc.replace(`Location ${sid}`, sname)
+              return loc !== a.locationName ? { ...a, locationName: loc } : a
+            }
+            setAllAssets(prev => {
+              const charAssets = prev[id]
+              return charAssets ? { ...prev, [id]: charAssets.map(patchLoc) } : prev
+            })
+          })
+          .catch(() => {})
+      }
     }
     if (jobsRes.status === 'fulfilled') {
       const names = await resolveTypeNames([...new Set(jobsRes.value.map(j => j.blueprint_type_id))])

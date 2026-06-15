@@ -3,7 +3,8 @@ import cors from 'cors'
 import Anthropic from '@anthropic-ai/sdk'
 import dotenv from 'dotenv'
 dotenv.config({ path: process.env.DOTENV_CONFIG_PATH || undefined })
-import { readFileSync, readdirSync, statSync, writeFileSync, existsSync } from 'fs'
+import { readFileSync, readdirSync, statSync, writeFileSync, existsSync, watch as fsWatch } from 'fs'
+import type { FSWatcher } from 'fs'
 import { join } from 'path'
 
 const app = express()
@@ -303,9 +304,39 @@ const contractCache = new Map<number, ContractCacheEntry>()
 
 // ── ESI group name resolution (server-side, throttled) ────────────────────
 // Resolves typeId→groupId→groupName via ESI. Runs server-side so there's no
-// browser connection exhaustion. Results are cached for the server's lifetime.
+// browser connection exhaustion. Results are persisted to type_groups.json so
+// the ~325 ESI calls only happen once ever, not on every server restart.
+const TYPE_GROUPS_FILE = join(process.cwd(), 'type_groups.json')
+
+interface TypeGroupsFile { types: Record<number, number>; groups: Record<number, string> }
+
+function loadTypeGroups(): TypeGroupsFile {
+  try {
+    if (existsSync(TYPE_GROUPS_FILE)) return JSON.parse(readFileSync(TYPE_GROUPS_FILE, 'utf8'))
+  } catch { /* corrupt file — start fresh */ }
+  return { types: {}, groups: {} }
+}
+
+function saveTypeGroups() {
+  try {
+    const data: TypeGroupsFile = {
+      types: Object.fromEntries(esiTypeGroupCache),
+      groups: Object.fromEntries(esiGroupNameCache),
+    }
+    writeFileSync(TYPE_GROUPS_FILE, JSON.stringify(data), 'utf8')
+  } catch { /* disk full — skip */ }
+}
+
 const esiTypeGroupCache = new Map<number, number>()   // typeId → groupId
 const esiGroupNameCache = new Map<number, string>()    // groupId → groupName
+
+// Pre-populate from disk on startup
+;(() => {
+  const { types, groups } = loadTypeGroups()
+  for (const [k, v] of Object.entries(types)) esiTypeGroupCache.set(Number(k), v)
+  for (const [k, v] of Object.entries(groups)) esiGroupNameCache.set(Number(k), v)
+  console.log(`Group cache loaded: ${esiTypeGroupCache.size} types, ${esiGroupNameCache.size} groups`)
+})()
 
 async function esiGet<T>(path: string): Promise<T> {
   const res = await fetch(`https://esi.evetech.net/latest${path}`)
@@ -344,11 +375,15 @@ async function enrichAssetsWithGroups(assets: AssetEntry[]): Promise<void> {
     } catch { /* skip */ }
   }))
   // Mutate assets in-place with group names
+  let anyNew = false
   for (const a of assets) {
     if (a.typeId === undefined) continue
     const groupId = esiTypeGroupCache.get(a.typeId)
     if (groupId !== undefined) a.groupName = esiGroupNameCache.get(groupId)
   }
+  // Persist if we learned anything new this pass
+  if (unknownTypeIds.length > 0 || unknownGroupIds.length > 0) { anyNew = true }
+  if (anyNew) saveTypeGroups()
 }
 
 // ── Asset sub-agent ────────────────────────────────────────────────────────
@@ -419,8 +454,77 @@ function buildAssetContext(assets: AssetEntry[]): string {
   return summaryLines.join('\n')
 }
 
+function getAllCachedAssets(characterId?: number, fallbackAssets?: AssetEntry[]): AssetEntry[] {
+  // Always aggregate across ALL characters in cache — mirrors intel's "search all logs" approach
+  // so assets on alt characters are never missed regardless of which char is active
+  if (assetCache.size > 0) {
+    const all: AssetEntry[] = []
+    for (const entry of assetCache.values()) all.push(...entry.assets)
+    return all
+  }
+  return fallbackAssets ?? []
+}
+
+const SERVER_SHIP_GROUP_RE = /frigate|destroyer|cruiser|battleship|battlecruiser|industrial|mining barge|exhumer|interceptor|assault frigate|interdictor|logistics|recon|command ship|marauder|black ops|stealth bomber|covert ops|shuttle|carrier|dreadnought|titan|force auxiliary|capsule|yacht/i
+
+function filterAssetsForQuery(assets: AssetEntry[], query: string): AssetEntry[] {
+  // 1. Location match — check if any known location system name appears in query
+  const locNames = new Set(assets.map(a => a.locationName.split(/\s+[-–]\s+/)[0].toLowerCase()))
+  for (const loc of locNames) {
+    if (loc.length > 2 && query.toLowerCase().includes(loc)) {
+      const filtered = assets.filter(a => a.locationName.toLowerCase().startsWith(loc))
+      if (filtered.length > 0) return filtered
+    }
+  }
+
+  // 2. Category match
+  if (/\b(ships?|fleet|hulls?)\b/i.test(query))
+    return assets.filter(a => SERVER_SHIP_GROUP_RE.test(a.groupName ?? ''))
+  if (/\b(blueprints?|bpos?|bpcs?)\b/i.test(query))
+    return assets.filter(a => a.runs !== undefined || a.isBlueprintCopy === true)
+  if (/\bdrones?\b/i.test(query))
+    return assets.filter(a => /drone/i.test(a.groupName ?? ''))
+  if (/\b(ammo|ammunition|charges?|missiles?|torpedoes?)\b/i.test(query))
+    return assets.filter(a => /charge|ammo|missile|torpedo|bomb/i.test(a.groupName ?? ''))
+  if (/\b(minerals?|materials?|ores?|moon\s*mat|planetary)\b/i.test(query))
+    return assets.filter(a => /mineral|moon mat|planetary|commodity|ore|ice product|fuel/i.test(a.groupName ?? ''))
+  if (/\b(modules?|fittings?|rigs?)\b/i.test(query)) {
+    return assets.filter(a =>
+      !SERVER_SHIP_GROUP_RE.test(a.groupName ?? '') &&
+      !/drone|charge|ammo|missile|mineral|moon|planetary|ore|fuel/i.test(a.groupName ?? '') &&
+      a.runs === undefined && !a.isBlueprintCopy)
+  }
+
+  // 3. Quoted item names
+  const quoted = [...query.matchAll(/"([^"]+)"/g)].map(m => m[1].toLowerCase())
+  if (quoted.length) {
+    const filtered = assets.filter(a => quoted.some(q => a.typeName.toLowerCase().includes(q)))
+    if (filtered.length > 0) return filtered
+  }
+
+  return assets // no filter — full context
+}
+
+const BROAD_QUERY_PATTERNS = [
+  /^(check\s+)?(my\s+)?(assets?|inventory|stuff|things?|items?)\.?$/i,
+  /^what\s+(assets?|stuff|inventory|items?\s+)?(do\s+i\s+have|have\s+i\s+got)\??$/i,
+  /^what\s+(do\s+i\s+own|['']?s\s+in\s+(my\s+)?inventory|are\s+my\s+assets?)\??$/i,
+  /^(show|list|display|give me)\s+(me\s+)?(all\s+)?(my\s+)?(assets?|inventory|stuff|everything)\.?$/i,
+  /^(everything|all)\s*(i\s+have|in\s+my\s+inventory)?\.?$/i,
+]
+
+function isBroadQuery(query: string): boolean {
+  const q = query.trim()
+  if (q.length < 6) return true
+  return BROAD_QUERY_PATTERNS.some(p => p.test(q))
+}
+
 async function executeAssetQuery(query: string, characterId?: number, fallbackAssets?: AssetEntry[]): Promise<string> {
-  const assets = (characterId && assetCache.get(characterId)?.assets) || fallbackAssets || []
+  if (isBroadQuery(query)) {
+    return 'Query too broad to search efficiently. Please narrow it down — are you looking for specific item names, a particular location (e.g. "what\'s in Jita?"), or a category (ships / modules / blueprints / materials / ammo)?'
+  }
+
+  const assets = getAllCachedAssets(characterId, fallbackAssets)
   if (!assets.length) return 'No asset data available — try refreshing EVE data first.'
 
   const cached = characterId ? assetCache.get(characterId) : null
@@ -437,12 +541,14 @@ async function executeAssetQuery(query: string, characterId?: number, fallbackAs
     return { ...a, locationName: a.locationName.replace(`Location ${id}`, name) }
   })
 
-  const assetContext = buildAssetContext(resolvedAssets)
+  const contextAssets = filterAssetsForQuery(resolvedAssets, query)
+  const isFiltered = contextAssets.length < resolvedAssets.length
+  const assetContext = buildAssetContext(contextAssets)
 
   try {
     const response = await anthropic.messages.create({
       model: 'claude-haiku-4-5',
-      max_tokens: 1024,
+      max_tokens: 512,
       system: [
         'You are an asset database for an EVE Online capsuleer.',
         'Answer queries about the pilot\'s inventory accurately and concisely.',
@@ -450,7 +556,9 @@ async function executeAssetQuery(query: string, characterId?: number, fallbackAs
         'For blueprints, always state ME/TE levels and whether it is a BPO or BPC.',
         'Respond in plain text — no markdown headers, no bullet lists unless listing items.',
         'IMPORTANT: Only report what is explicitly listed below. If an item or quantity is present in the inventory data, state it confidently. Do not speculate or claim uncertainty about data that is clearly listed.',
-        'If the inventory is marked as partial, note which locations may be incomplete — but never fabricate uncertainty about data that is actually present.',
+        isFiltered
+          ? `Showing ${contextAssets.length} of ${resolvedAssets.length} total stacks — filtered to query topic.`
+          : 'If the inventory is marked as partial, note which locations may be incomplete — but never fabricate uncertainty about data that is actually present.',
         syncAge !== null
           ? `Inventory last synced: ${syncAge} minute(s) ago. Total stacks: ${assets.length}.`
           : '',
@@ -536,7 +644,7 @@ const TYPE_COLOR: Record<string, number> = {
   'Other': 0x95A5A6,
 }
 
-async function postToDiscord(item: FeedbackItem, screenshotBase64?: string | null) {
+async function postToDiscord(item: FeedbackItem, screenshotBase64?: string | null, log?: string | null) {
   const webhookUrl = process.env.DISCORD_WEBHOOK_URL
   if (!webhookUrl) return
   const fields = []
@@ -550,11 +658,17 @@ async function postToDiscord(item: FeedbackItem, screenshotBase64?: string | nul
     ...(screenshotBase64 ? { image: { url: 'attachment://screenshot.png' } } : {}),
   }
   try {
-    if (screenshotBase64) {
-      const buf = Buffer.from(screenshotBase64, 'base64')
+    const hasFiles = screenshotBase64 || log
+    if (hasFiles) {
       const form = new FormData()
       form.append('payload_json', JSON.stringify({ embeds: [embed] }))
-      form.append('files[0]', new Blob([buf], { type: 'image/png' }), 'screenshot.png')
+      if (screenshotBase64) {
+        const buf = Buffer.from(screenshotBase64, 'base64')
+        form.append('files[0]', new Blob([buf], { type: 'image/png' }), 'screenshot.png')
+      }
+      if (log) {
+        form.append('files[1]', new Blob([log], { type: 'text/plain' }), 'aurora.log')
+      }
       await fetch(webhookUrl, { method: 'POST', body: form })
     } else {
       await fetch(webhookUrl, {
@@ -569,14 +683,14 @@ async function postToDiscord(item: FeedbackItem, screenshotBase64?: string | nul
 }
 
 app.post('/api/feedback', async (req, res) => {
-  const { type, description, steps, panel, version, screenshot } = req.body as { type: string; description: string; steps?: string; panel: string; version?: string; screenshot?: string | null }
+  const { type, description, steps, panel, version, screenshot, log } = req.body as { type: string; description: string; steps?: string; panel: string; version?: string; screenshot?: string | null; log?: string | null }
   if (!description?.trim()) return res.status(400).json({ error: 'description required' })
   const items = loadFeedback()
   const item: FeedbackItem = { id: Date.now().toString(), type: type || 'Bug', description: description.trim(), steps: steps || null, panel: panel || 'unknown', version, createdAt: new Date().toISOString() }
   items.push(item)
   writeFileSync(FEEDBACK_FILE, JSON.stringify(items, null, 2), 'utf8')
   res.json(item)
-  postToDiscord(item, screenshot) // fire and forget — don't block the response
+  postToDiscord(item, screenshot, log) // fire and forget — don't block the response
 })
 
 // ── Todos ─────────────────────────────────────────────────────────────────────
@@ -811,13 +925,28 @@ const MARKET_TOOLS: Anthropic.Tool[] = [
   },
   {
     name: 'query_assets',
-    description: 'Query the pilot\'s full asset inventory. Use this for ANY question about what the pilot owns: item counts, locations, ships, materials, blueprints, or whether a specific item exists anywhere. Do NOT try to answer asset questions from memory — always call this tool.',
+    description: 'Query the pilot\'s full asset inventory using natural language. Use for open-ended questions like "list all ships", "what materials do I have in Jita?", "show me all blueprints". For checking whether specific named items exist (e.g. from a fit or shopping list), use lookup_items instead — it is faster and cheaper.',
     input_schema: {
       type: 'object' as const,
       properties: {
         query: { type: 'string', description: 'Natural language question about the pilot\'s assets, e.g. "how much Tritanium do I have?", "list all ships", "do I have any Raven blueprints?"' },
       },
       required: ['query'],
+    },
+  },
+  {
+    name: 'lookup_items',
+    description: 'Check the pilot\'s inventory for a specific list of item names — exact counts and locations, no guessing. Use this whenever you have a list of named items to check (e.g. a ship fit, shopping list, or manifest). Returns each item\'s total quantity and which locations it\'s stocked at. Much faster and cheaper than query_assets for batch lookups.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        items: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'List of exact item names to look up, e.g. ["Damage Control II", "Malediction", "Navy Cap Booster 400"]',
+        },
+      },
+      required: ['items'],
     },
   },
   {
@@ -1006,8 +1135,82 @@ const RIG_BONUSES: Record<string, Record<string, { me: number; te: number }>> = 
 }
 
 // ── Blueprint chain resolution ────────────────────────────────────────────
-// Persistent cache: product typeId → blueprint info (survives request lifetime)
-const bpByProductCache = new Map<number, { bpTypeId: number; activity: 'manufacturing' | 'reaction' } | null>()
+const BP_TYPE_CACHE_FILE = join(process.cwd(), 'bp_type_cache.json')
+
+type BpCacheEntry = { bpTypeId: number; activity: 'manufacturing' | 'reaction' } | null
+
+function loadBpTypeCache(): Map<number, BpCacheEntry> {
+  try {
+    if (existsSync(BP_TYPE_CACHE_FILE)) {
+      const raw = JSON.parse(readFileSync(BP_TYPE_CACHE_FILE, 'utf8')) as Record<string, BpCacheEntry>
+      return new Map(Object.entries(raw).map(([k, v]) => [Number(k), v]))
+    }
+  } catch { /* corrupt — start fresh */ }
+  return new Map()
+}
+
+function saveBpTypeCache() {
+  try {
+    const obj: Record<number, BpCacheEntry> = {}
+    for (const [k, v] of bpByProductCache) obj[k] = v
+    writeFileSync(BP_TYPE_CACHE_FILE, JSON.stringify(obj), 'utf8')
+  } catch { /* disk full — skip */ }
+}
+
+const bpByProductCache: Map<number, BpCacheEntry> = loadBpTypeCache()
+console.log(`Blueprint type cache loaded: ${bpByProductCache.size} entries`)
+
+// ── Blueprint SDE data cache ───────────────────────────────────────────────
+// Caches full activities data from ref-data.everef.net so repeat lookups
+// (chain resolution, calculate_blueprint tool, blueprint panel) never re-fetch.
+// Blueprint data only changes on CCP balance patches — safe to cache indefinitely.
+const BP_DATA_CACHE_FILE = join(process.cwd(), 'bp_data_cache.json')
+
+interface BpActivities {
+  manufacturing?: {
+    materials?:       Record<string, { type_id: number; quantity: number }>
+    products?:        Record<string, { type_id: number; quantity: number }>
+    required_skills?: Record<string, number>
+    time?:            number
+  }
+  reaction?: {
+    materials?: Record<string, { type_id: number; quantity: number }>
+    products?:  Record<string, { type_id: number; quantity: number }>
+    time?:      number
+  }
+}
+
+const bpDataCache = new Map<number, BpActivities>((() => {
+  try {
+    if (existsSync(BP_DATA_CACHE_FILE)) {
+      const raw = JSON.parse(readFileSync(BP_DATA_CACHE_FILE, 'utf8')) as Record<string, BpActivities>
+      return Object.entries(raw).map(([k, v]) => [Number(k), v] as [number, BpActivities])
+    }
+  } catch { /* corrupt — start fresh */ }
+  return []
+})())
+console.log(`Blueprint data cache loaded: ${bpDataCache.size} blueprints`)
+
+function saveBpDataCache() {
+  try {
+    const obj: Record<number, BpActivities> = {}
+    for (const [k, v] of bpDataCache) obj[k] = v
+    writeFileSync(BP_DATA_CACHE_FILE, JSON.stringify(obj), 'utf8')
+  } catch { /* disk full — skip */ }
+}
+
+async function fetchBlueprintData(bpTypeId: number): Promise<BpActivities | null> {
+  if (bpDataCache.has(bpTypeId)) return bpDataCache.get(bpTypeId)!
+  try {
+    const res = await fetch(`https://ref-data.everef.net/blueprints/${bpTypeId}`)
+    if (!res.ok) return null
+    const bp = await res.json() as { activities?: BpActivities }
+    const activities = bp.activities ?? {}
+    bpDataCache.set(bpTypeId, activities)
+    saveBpDataCache()
+    return activities
+  } catch { return null }
+}
 
 async function findBpForProduct(productTypeId: number, productName: string): Promise<{ bpTypeId: number; activity: 'manufacturing' | 'reaction' } | null> {
   if (bpByProductCache.has(productTypeId)) return bpByProductCache.get(productTypeId)!
@@ -1025,11 +1228,13 @@ async function findBpForProduct(productTypeId: number, productName: string): Pro
       if (hit) {
         const result = { bpTypeId: hit.typeID, activity }
         bpByProductCache.set(productTypeId, result)
+        saveBpTypeCache()
         return result
       }
     } catch { /* skip */ }
   }
   bpByProductCache.set(productTypeId, null)
+  saveBpTypeCache()
   return null
 }
 
@@ -1061,15 +1266,9 @@ async function resolveChainNode(
   if (bpInfo.activity === 'reaction' && !includeReactions) return rawNode
 
   try {
-    const bpRes = await fetch(`https://ref-data.everef.net/blueprints/${bpInfo.bpTypeId}`)
-    if (!bpRes.ok) return rawNode
-    const bp = await bpRes.json() as {
-      activities?: {
-        manufacturing?: { materials?: Record<string, { type_id: number; quantity: number }>; products?: Record<string, { type_id: number; quantity: number }>; time?: number }
-        reaction?:      { materials?: Record<string, { type_id: number; quantity: number }>; products?: Record<string, { type_id: number; quantity: number }>; time?: number }
-      }
-    }
-    const act = bpInfo.activity === 'reaction' ? bp.activities?.reaction : bp.activities?.manufacturing
+    const activities = await fetchBlueprintData(bpInfo.bpTypeId)
+    if (!activities) return rawNode
+    const act = bpInfo.activity === 'reaction' ? activities.reaction : activities.manufacturing
     if (!act) return rawNode
 
     const rawMats  = Object.values(act.materials ?? {})
@@ -1116,18 +1315,9 @@ app.get('/api/industry/blueprint/chain', async (req, res) => {
   if (!typeId) return res.status(400).json({ error: 'typeId required' })
 
   try {
-    const bpRes = await fetch(`https://ref-data.everef.net/blueprints/${typeId}`)
-    if (!bpRes.ok) return res.status(404).json({ error: 'Blueprint not found' })
-    const bp = await bpRes.json() as {
-      activities?: {
-        manufacturing?: {
-          materials?: Record<string, { type_id: number; quantity: number }>
-          products?:  Record<string, { type_id: number; quantity: number }>
-          time?: number
-        }
-      }
-    }
-    const mfg = bp.activities?.manufacturing
+    const activities = await fetchBlueprintData(typeId)
+    if (!activities) return res.status(404).json({ error: 'Blueprint not found' })
+    const mfg = activities.manufacturing
     if (!mfg) return res.status(404).json({ error: 'No manufacturing activity' })
 
     const rawMats = Object.values(mfg.materials ?? {})
@@ -1264,6 +1454,35 @@ async function executeMarketTool(name: string, input: Record<string, unknown>, c
   if (name === 'query_assets') {
     const query = String(input.query ?? '')
     return await executeAssetQuery(query, characterId, fallbackAssets)
+  }
+  if (name === 'lookup_items') {
+    const names: string[] = Array.isArray(input.items) ? input.items.map(String) : []
+    const assets = getAllCachedAssets(characterId, fallbackAssets)
+    if (!assets.length) return { error: 'No asset data available — try refreshing EVE data first.' }
+
+    // Build name→{qty, locations} map with case-insensitive matching
+    const nameMap = new Map<string, { quantity: number; locations: string[] }>()
+    for (const a of assets) {
+      const key = a.typeName.toLowerCase()
+      const existing = nameMap.get(key)
+      if (existing) {
+        existing.quantity += a.quantity
+        if (!existing.locations.includes(a.locationName)) existing.locations.push(a.locationName)
+      } else {
+        nameMap.set(key, { quantity: a.quantity, locations: [a.locationName] })
+      }
+    }
+
+    const results = names.map(name => {
+      const match = nameMap.get(name.toLowerCase())
+      return match
+        ? { name, quantity: match.quantity, locations: match.locations, found: true }
+        : { name, quantity: 0, locations: [], found: false }
+    })
+
+    const found = results.filter(r => r.found)
+    const missing = results.filter(r => !r.found)
+    return { results, summary: `${found.length}/${names.length} items found in inventory. Missing: ${missing.map(r => r.name).join(', ') || 'none'}.` }
   }
   if (name === 'appraise_items') {
     const items = String(input.items ?? '')
@@ -1535,21 +1754,9 @@ async function executeMarketTool(name: string, input: Record<string, unknown>, c
 
     if (!typeId) return { error: `Could not find a blueprint named "${searchTerm}". Try a more specific item name.` }
 
-    // Fetch blueprint SDE data
-    const bpRes = await fetch(`https://ref-data.everef.net/blueprints/${typeId}`)
-    if (!bpRes.ok) return { error: `Blueprint data not found for "${searchTerm}" (typeId ${typeId})` }
-    const bp = await bpRes.json() as {
-      activities?: {
-        manufacturing?: {
-          materials?:       Record<string, { type_id: number; quantity: number }>
-          products?:        Record<string, { type_id: number; quantity: number }>
-          required_skills?: Record<string, number>
-          time?:            number
-        }
-      }
-    }
-
-    const mfg = bp.activities?.manufacturing
+    const activities = await fetchBlueprintData(typeId)
+    if (!activities) return { error: `Blueprint data not found for "${searchTerm}" (typeId ${typeId})` }
+    const mfg = activities.manufacturing
     if (!mfg) return { error: `"${searchTerm}" has no manufacturing activity` }
 
     const rawMaterials  = Object.values(mfg.materials ?? {})
@@ -1710,35 +1917,65 @@ app.get('/api/assets/status', (req, res) => {
 // Scans cached assets for player-owned structure location IDs (>1e12),
 // resolves names via authenticated GET /universe/structures/{id}/ (requires
 // docking rights), and returns {id, name}[] for the character.
+app.get('/api/cache/status', (_req, res) => {
+  const reactions = [...bpDataCache.values()].filter(a => a.reaction).length
+  const manufacturing = [...bpDataCache.values()].filter(a => a.manufacturing).length
+  res.json({
+    blueprints: bpDataCache.size,
+    reactions,
+    manufacturing,
+    typeGroups: typeGroupsCache.size,
+    structures: structureMapCache.size,
+  })
+})
+
+// Accepts explicit structureIds[] in query to support alt characters whose
+// IDs aren't in assetCache yet, and skips any already in structureMapCache.
 app.get('/api/assets/structures', async (req, res) => {
   const characterId = req.query.characterId ? Number(req.query.characterId) : undefined
   const accessToken = req.query.accessToken as string | undefined
   if (!accessToken) return res.status(400).json({ error: 'accessToken required' })
 
-  const entries = characterId
-    ? (assetCache.has(characterId) ? [[characterId, assetCache.get(characterId)!] as [number, AssetCacheEntry]] : [])
-    : [...assetCache.entries()]
+  // Accept explicit IDs from client (for alt characters) or fall back to assetCache
+  const explicitIds = req.query.ids
+    ? String(req.query.ids).split(',').map(Number).filter(Boolean)
+    : null
 
   const structureIdSet = new Set<number>()
-  for (const [, entry] of entries) {
-    for (const id of entry.structureIds) structureIdSet.add(id)
+  if (explicitIds?.length) {
+    for (const id of explicitIds) structureIdSet.add(id)
+  } else {
+    const entries = characterId
+      ? (assetCache.has(characterId) ? [[characterId, assetCache.get(characterId)!] as [number, AssetCacheEntry]] : [])
+      : [...assetCache.entries()]
+    for (const [, entry] of entries) {
+      for (const id of entry.structureIds) structureIdSet.add(id)
+    }
   }
 
   if (!structureIdSet.size) return res.json([])
 
+  // Return already-cached names immediately; only fetch what's missing
+  const cached = getStructureMap()
   const results: { id: number; name: string }[] = []
+  const toFetch: number[] = []
   for (const id of structureIdSet) {
+    const name = cached.get(id)
+    if (name) results.push({ id, name })
+    else toFetch.push(id)
+  }
+
+  // Parallel fetch for uncached structures
+  await Promise.allSettled(toFetch.map(async id => {
     try {
       const esiRes = await fetch(`https://esi.evetech.net/latest/universe/structures/${id}/`, {
         headers: { Authorization: `Bearer ${accessToken}` },
       })
-      if (!esiRes.ok) continue
+      if (!esiRes.ok) return
       const data = await esiRes.json() as { name: string }
-      results.push({ id, name: data.name })
-    } catch {
-      // skip structures we can't resolve
-    }
-  }
+      if (data.name) results.push({ id, name: data.name })
+    } catch { /* no docking rights or structure deleted — skip */ }
+  }))
 
   return res.json(results)
 })
@@ -1840,21 +2077,9 @@ app.get('/api/industry/blueprint', async (req, res) => {
   if (!typeId) return res.status(400).json({ error: 'typeId required' })
 
   try {
-    // Fetch raw blueprint data from EVE Ref
-    const bpRes = await fetch(`https://ref-data.everef.net/blueprints/${typeId}`)
-    if (!bpRes.ok) return res.status(404).json({ error: `Blueprint ${typeId} not found in SDE` })
-    const bp = await bpRes.json() as {
-      activities?: {
-        manufacturing?: {
-          materials?:       Record<string, { type_id: number; quantity: number }>
-          products?:        Record<string, { type_id: number; quantity: number }>
-          required_skills?: Record<string, number>   // skillTypeId → minLevel
-          time?:            number
-        }
-      }
-    }
-
-    const mfg = bp.activities?.manufacturing
+    const activities = await fetchBlueprintData(typeId)
+    if (!activities) return res.status(404).json({ error: `Blueprint ${typeId} not found in SDE` })
+    const mfg = activities.manufacturing
     if (!mfg) return res.status(404).json({ error: 'Blueprint has no manufacturing activity' })
 
     const rawMaterials  = Object.values(mfg.materials ?? {})
@@ -3140,6 +3365,155 @@ app.get('/api/intel-auto', (req, res) => {
   }
 })
 
+// ── Intel SSE stream ─────────────────────────────────────────────────────────
+// Watches the EVE chatlog directory and pushes new entries to connected clients.
+// Zero CPU when no intel is being written — fires only when EVE appends a line.
+
+interface IntelSseClient {
+  res: express.Response
+  listener: string | null
+  watchNames: string[]
+  trackedFiles: Set<string>
+}
+
+const intelSseClients  = new Set<IntelSseClient>()
+const intelFileOffsets = new Map<string, number>()  // filename → last byte sent
+const intelLineBuffers = new Map<string, string>()  // filename → partial trailing line
+const intelChanNames   = new Map<string, string>()  // filename → cached channel name
+let   intelDirWatcher: FSWatcher | null = null
+
+function intelFilesForClient(listener: string | null, watchNames: string[]): string[] {
+  try {
+    const allFiles = readdirSync(CHATLOG_DIR)
+      .filter(f => f.endsWith('.txt'))
+      .map(f => ({ name: f, mtime: statSync(join(CHATLOG_DIR, f)).mtimeMs }))
+      .sort((a, b) => b.mtime - a.mtime)
+    const seen = new Set<string>()
+    const selected: string[] = []
+    const listenerFiles = listener
+      ? allFiles.filter(({ name }) => {
+          try {
+            const text = readFileSync(join(CHATLOG_DIR, name)).toString('utf16le').replace(/﻿/g, '')
+            const m = text.match(/Listener:\s+(.+)/)
+            return m ? m[1].trim().toLowerCase() === listener : false
+          } catch { return false }
+        })
+      : allFiles
+    for (const f of listenerFiles) {
+      if (selected.length >= 3) break
+      seen.add(f.name); selected.push(f.name)
+    }
+    for (const watchName of watchNames) {
+      const match = allFiles.find(f => !seen.has(f.name) && f.name.toLowerCase().startsWith(watchName))
+      if (match) { seen.add(match.name); selected.push(match.name) }
+    }
+    return selected
+  } catch { return [] }
+}
+
+function parseNewIntelLines(filename: string) {
+  try {
+    const buf = readFileSync(join(CHATLOG_DIR, filename))
+    const prevOffset = intelFileOffsets.get(filename) ?? 0
+    if (buf.length === prevOffset) return []
+    // File truncated (editor replaced it) — reset and re-parse from start
+    if (buf.length < prevOffset) {
+      intelFileOffsets.set(filename, buf.length)
+      intelLineBuffers.delete(filename)
+      return []
+    }
+    const newText = buf.slice(prevOffset).toString('utf16le')
+    intelFileOffsets.set(filename, buf.length)
+    const pending  = (intelLineBuffers.get(filename) ?? '') + newText
+    const rawLines = pending.split('\n')
+    intelLineBuffers.set(filename, rawLines.pop() ?? '')
+    const channelName = intelChanNames.get(filename) ?? 'Unknown Channel'
+    const re = /^\s*\[\s*(\d{4}\.\d{2}\.\d{2}\s+\d{2}:\d{2}:\d{2})\s*\]\s*([^>]+?)\s*>\s*(.+)$/
+    const idCount = new Map<string, number>()
+    const results: Array<{ id: string; timestamp: string; character: string; message: string; category: string; channelName: string }> = []
+    for (const line of rawLines) {
+      const m = line.replace(/\r$/, '').match(re)
+      if (!m) continue
+      const [, ts, character, message] = m
+      const char = character.trim()
+      if (char === 'EVE System') continue
+      const baseId = `${ts}-${char}`
+      const n = (idCount.get(baseId) ?? 0) + 1
+      idCount.set(baseId, n)
+      results.push({ id: n === 1 ? baseId : `${baseId}-${n}`, timestamp: ts.replace(/\./g, '-').replace(' ', 'T') + 'Z', character: char, message: message.trim(), category: categoriseMsg(message), channelName })
+    }
+    return results
+  } catch { return [] }
+}
+
+function intelBroadcast(filename: string) {
+  if (!intelSseClients.size) return
+  const entries = parseNewIntelLines(filename)
+  if (!entries.length) return
+  for (const client of intelSseClients) {
+    if (!client.trackedFiles.has(filename)) continue
+    for (const entry of entries) {
+      try { client.res.write(`event: entry\ndata: ${JSON.stringify(entry)}\n\n`) } catch { /* disconnected */ }
+    }
+  }
+}
+
+function startIntelWatcher() {
+  if (intelDirWatcher) return
+  try {
+    intelDirWatcher = fsWatch(CHATLOG_DIR, (_evt, filename) => {
+      if (!filename) return
+      // Accept .txt directly, or strip common temp suffixes editors use before rename
+      const target = filename.endsWith('.txt') ? filename
+        : filename.replace(/~$/, '').replace(/\.tmp$/i, '')
+      if (!target.endsWith('.txt')) return
+      setTimeout(() => intelBroadcast(target), 250)
+    })
+    intelDirWatcher.on('error', () => { intelDirWatcher = null })
+  } catch { /* dir may not exist */ }
+}
+
+app.get('/api/intel-stream', (req, res) => {
+  const listener   = (req.query.listener as string | undefined)?.trim().toLowerCase() || null
+  const watchParam = (req.query.watch   as string | undefined) ?? ''
+  const watchNames = watchParam ? watchParam.split(',').map(s => s.trim().toLowerCase()).filter(Boolean) : []
+
+  res.setHeader('Content-Type', 'text/event-stream')
+  res.setHeader('Cache-Control', 'no-cache')
+  res.setHeader('Connection', 'keep-alive')
+  res.setHeader('X-Accel-Buffering', 'no')
+  res.flushHeaders()
+
+  const client: IntelSseClient = { res, listener, watchNames, trackedFiles: new Set() }
+  intelSseClients.add(client)
+  startIntelWatcher()
+
+  // Bootstrap: last 5 min of entries per file, then signal baseline complete
+  const cutoff = Date.now() - 5 * 60 * 1000
+  for (const filename of intelFilesForClient(listener, watchNames)) {
+    client.trackedFiles.add(filename)
+    try {
+      const buf    = readFileSync(join(CHATLOG_DIR, filename))
+      const text   = buf.toString('utf16le').replace(/﻿/g, '')
+      const parsed = parseEveLog(text)
+      intelChanNames.set(filename, parsed.channelName)
+      intelFileOffsets.set(filename, buf.length)
+      intelLineBuffers.delete(filename)
+      const recent = parsed.entries.filter(e => new Date(e.timestamp).getTime() >= cutoff)
+      if (recent.length) res.write(`event: bootstrap\ndata: ${JSON.stringify({ channelName: parsed.channelName, entries: recent })}\n\n`)
+    } catch { /* skip */ }
+  }
+  res.write(`event: ready\ndata: {}\n\n`)
+
+  const heartbeat = setInterval(() => { try { res.write(':\n\n') } catch { /* ignore */ } }, 30_000)
+
+  req.on('close', () => {
+    clearInterval(heartbeat)
+    intelSseClients.delete(client)
+    if (!intelSseClients.size) { intelDirWatcher?.close(); intelDirWatcher = null }
+  })
+})
+
 // ── Fit database ─────────────────────────────────────────────────────────
 interface SavedFit { id: string; name: string; shipType: string; fitText: string; createdAt: string }
 const FITS_FILE = join(process.cwd(), 'fits.json')
@@ -3760,4 +4134,94 @@ app.post('/api/tts', async (req, res) => {
 
 app.listen(PORT, () => {
   console.log(`Aurora server running on http://localhost:${PORT}`)
+  prewarmReactionCache()
+  prewarmManufacturingCache()
 })
+
+// Pre-populate bp_data_cache.json with all reaction formula blueprints on startup.
+// Uses ESI public search (no auth) to discover typeIds, then fetches SDE data for
+// any not already cached. Runs in the background — does not block server startup.
+async function prewarmReactionCache() {
+  const alreadyCached = [...bpDataCache.values()].filter(a => a.reaction).length
+  if (alreadyCached > 50) {
+    console.log(`Reaction cache already warm: ${alreadyCached} reaction blueprints cached`)
+    return
+  }
+
+  // Market group IDs under 1849 "Reaction Formulas":
+  // 2402 Biochemical, 2403 Composite, 2404 Polymer
+  const REACTION_MARKET_GROUPS = [2402, 2403, 2404]
+
+  try {
+    const groupResults = await Promise.all(
+      REACTION_MARKET_GROUPS.map(id =>
+        fetch(`https://esi.evetech.net/latest/markets/groups/${id}/?datasource=tranquility`, { headers: { Accept: 'application/json' } })
+          .then(r => r.ok ? r.json() as Promise<{ types: number[] }> : { types: [] as number[] })
+          .catch(() => ({ types: [] as number[] }))
+      )
+    )
+    const typeIds = groupResults.flatMap(g => g.types)
+    const uncached = typeIds.filter(id => !bpDataCache.has(id))
+    console.log(`Reaction pre-warm: ${typeIds.length} formulas found, ${uncached.length} to fetch`)
+    if (!uncached.length) return
+
+    // Fetch in batches of 5 with 150ms gaps to avoid hammering everef
+    for (let i = 0; i < uncached.length; i += 5) {
+      await Promise.allSettled(uncached.slice(i, i + 5).map(id => fetchBlueprintData(id)))
+      if (i + 5 < uncached.length) await new Promise(r => setTimeout(r, 150))
+    }
+    console.log(`Reaction pre-warm complete: ${bpDataCache.size} total blueprints cached`)
+  } catch (err) {
+    console.warn('Reaction cache pre-warm failed:', err)
+  }
+}
+
+// Pre-populate bp_data_cache.json with ship, weapon, module, ammo, drone, and component blueprints.
+// Uses /universe/groups/{id}/ (SDE groups, not market groups) to enumerate typeIds.
+// Runs after reaction pre-warm so they don't compete.
+async function prewarmManufacturingCache() {
+  // SDE universe group IDs for high-volume blueprint categories.
+  // Grouped here for readability; all fetched together.
+  const MANUFACTURING_UNIVERSE_GROUPS = [
+    // Ships
+    105, 106, 107, 108, 110, 111, 503, 525, 537, 830, 831, 832, 833, 834, 944, 945, 1013,
+    // Weapons
+    133, 135, 154, 166, 136, 152,
+    // Modules
+    118, 120, 121, 126, 130, 131, 132, 134, 139, 140, 141, 142, 143, 145, 147, 148, 151, 156, 157, 158, 218, 223, 224, 296, 504,
+    // Ammo / charges
+    165, 167, 168, 169,
+    // Drones
+    176, 177,
+    // Rigs
+    787,
+    // Capital components
+    914, 915,
+  ]
+
+  // Wait for reaction pre-warm to finish first (rough delay)
+  await new Promise(r => setTimeout(r, 5000))
+
+  try {
+    const groupResults = await Promise.all(
+      MANUFACTURING_UNIVERSE_GROUPS.map(id =>
+        fetch(`https://esi.evetech.net/latest/universe/groups/${id}/?datasource=tranquility`, { headers: { Accept: 'application/json' } })
+          .then(r => r.ok ? r.json() as Promise<{ types: number[] }> : { types: [] as number[] })
+          .catch(() => ({ types: [] as number[] }))
+      )
+    )
+    const typeIds = [...new Set(groupResults.flatMap(g => g.types ?? []))]
+    const uncached = typeIds.filter(id => !bpDataCache.has(id))
+    console.log(`Manufacturing pre-warm: ${typeIds.length} blueprint types found, ${uncached.length} to fetch`)
+    if (!uncached.length) return
+
+    // Fetch in batches of 10 with 200ms gaps
+    for (let i = 0; i < uncached.length; i += 10) {
+      await Promise.allSettled(uncached.slice(i, i + 10).map(id => fetchBlueprintData(id)))
+      if (i + 10 < uncached.length) await new Promise(r => setTimeout(r, 200))
+    }
+    console.log(`Manufacturing pre-warm complete: ${bpDataCache.size} total blueprints cached`)
+  } catch (err) {
+    console.warn('Manufacturing cache pre-warm failed:', err)
+  }
+}

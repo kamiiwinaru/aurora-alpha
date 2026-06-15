@@ -24,6 +24,8 @@ export default function FeedbackModal({ activePanel, onClose, screenshot }: Prop
   async function handleSubmit() {
     if (!description.trim()) return
     setSubmitting(true)
+    const log = window.electronAPI?.readLog ? await window.electronAPI.readLog() : null
+
     try {
       await fetch('/api/feedback', {
         method: 'POST',
@@ -35,6 +37,7 @@ export default function FeedbackModal({ activePanel, onClose, screenshot }: Prop
           panel: activePanel,
           version,
           screenshot: includeScreenshot ? screenshot : null,
+          log,
         }),
       })
       setSubmitted(true)

@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { RefreshCw, Factory, Truck, AlertTriangle, ArrowRight, FlaskConical, CheckCircle2, XCircle, Search, X, ShoppingCart, Zap, Wrench, ChevronDown, ChevronRight as ChevronRightIcon, Copy, Check } from 'lucide-react'
+import { RefreshCw, Factory, Truck, AlertTriangle, ArrowRight, FlaskConical, CheckCircle2, XCircle, Search, X, ShoppingCart, Zap, Wrench, ChevronDown, ChevronRight as ChevronRightIcon, Copy, Check, Download } from 'lucide-react'
 import type { EveIndustryJob, EveSkill, EveAsset, EveCharacter } from '../../types'
 import { timeUntil, formatISK } from '../../lib/eve-esi'
 
@@ -478,6 +478,41 @@ function StepsPopout({
   const steps = useMemo(() => chainData ? flattenChainToSteps(chainData.chain) : [], [chainData])
   const reactions = steps.filter(s => s.activity === 'reaction')
   const manufacturing = steps.filter(s => s.activity === 'manufacturing')
+
+  const exportCSV = () => {
+    if (!chainData) return
+    const esc = (v: string | number) => `"${String(v).replace(/"/g, '""')}"`
+    const rows: string[] = []
+
+    rows.push('SECTION,NAME,QTY NEEDED,QTY HAVE,QTY TO BUY,RUNS,TIME (s),ACTIVITY,INPUT NAME,INPUT QTY,INPUT SOURCE')
+
+    for (const item of chainData.buyList) {
+      rows.push([esc('Materials'), esc(item.name), item.qty, item.have, Math.max(0, item.qty - item.have), '', '', '', '', '', ''].join(','))
+    }
+
+    for (const step of [...reactions, ...manufacturing]) {
+      const totalTime = step.timePerRun * step.runsNeeded
+      if (step.inputs.length === 0) {
+        rows.push([esc(step.activity === 'reaction' ? 'Reactions' : 'Manufacturing'), esc(step.name), step.qtyNeeded, '', '', step.runsNeeded, totalTime, esc(step.activity), '', '', ''].join(','))
+      } else {
+        step.inputs.forEach((inp, i) => {
+          if (i === 0) {
+            rows.push([esc(step.activity === 'reaction' ? 'Reactions' : 'Manufacturing'), esc(step.name), step.qtyNeeded, '', '', step.runsNeeded, totalTime, esc(step.activity), esc(inp.name), inp.qty, esc(inp.source)].join(','))
+          } else {
+            rows.push(['', '', '', '', '', '', '', '', esc(inp.name), inp.qty, esc(inp.source)].join(','))
+          }
+        })
+      }
+    }
+
+    const blob = new Blob([rows.join('\n')], { type: 'text/csv' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `${chainData.productName.replace(/[^a-z0-9]/gi, '_')}_build_chain.csv`
+    a.click()
+    URL.revokeObjectURL(url)
+  }
   const mfgStructLabel = STRUCTURES.find(s => s.key === mfgStructure)?.label ?? mfgStructure
   const rxStructLabel  = REACTION_STRUCTURES.find(s => s.key === rxStructure)?.label ?? rxStructure
 
@@ -510,7 +545,14 @@ function StepsPopout({
           <span className="text-eve-cyan text-[10px] tracking-widest uppercase shrink-0">Build Chain</span>
           <span className="text-eve-dim text-[9px] truncate">— {blueprint.typeName}</span>
         </div>
-        <button onClick={onClose} className="text-eve-dim hover:text-eve-red transition-colors ml-2 shrink-0"><X size={11} /></button>
+        <div className="flex items-center gap-2 ml-2 shrink-0">
+          {chainData && !chainLoading && (
+            <button onClick={exportCSV} className="text-eve-dim hover:text-eve-cyan transition-colors" title="Export to CSV">
+              <Download size={11} />
+            </button>
+          )}
+          <button onClick={onClose} className="text-eve-dim hover:text-eve-red transition-colors"><X size={11} /></button>
+        </div>
       </div>
 
       {/* Body */}

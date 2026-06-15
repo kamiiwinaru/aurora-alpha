@@ -82,6 +82,77 @@ const TTS_MODE_KEY = 'aurora_tts_mode'
 const VOICE_CHANNEL_NAME = 'aurora_voice_session'
 export type TtsMode = 'concise' | 'standard' | 'full'
 
+// ── Client-side asset routing (Option 5) ─────────────────────────────────────
+// Zero-cost category and location query handlers — filter eveContext.assets
+// directly without touching the API. Only fires for clear ownership queries.
+
+const SHIP_GROUP_RE = /frigate|destroyer|cruiser|battleship|battlecruiser|industrial|mining barge|exhumer|interceptor|assault frigate|interdictor|logistics|recon|command ship|marauder|black ops|stealth bomber|covert ops|shuttle|carrier|dreadnought|titan|force auxiliary|capsule|yacht/i
+
+const ASSET_CATEGORIES: Array<{
+  label: string
+  queryPattern: RegExp
+  filter: (a: EveAsset) => boolean
+}> = [
+  { label: 'Ships',      queryPattern: /\b(ships?|fleet|hulls?)\b/i,                          filter: a => SHIP_GROUP_RE.test(a.groupName ?? '') },
+  { label: 'Blueprints', queryPattern: /\b(blueprints?|bpos?|bpcs?)\b/i,                      filter: a => a.isBlueprintCopy !== undefined },
+  { label: 'Drones',     queryPattern: /\bdrones?\b/i,                                        filter: a => /drone/i.test(a.groupName ?? '') },
+  { label: 'Ammo',       queryPattern: /\b(ammo|ammunition|charges?|missiles?|torpedoes?)\b/i, filter: a => /charge|ammo|missile|torpedo|bomb/i.test(a.groupName ?? '') },
+  { label: 'Materials',  queryPattern: /\b(minerals?|materials?|ores?|moon\s*mat|planetary|pi)\b/i, filter: a => /mineral|moon mat|planetary|commodity|ore|ice product|fuel/i.test(a.groupName ?? '') },
+  { label: 'Modules',    queryPattern: /\b(modules?|fittings?|rigs?|equipment|mods?)\b/i,
+    filter: a => !SHIP_GROUP_RE.test(a.groupName ?? '')
+      && !/drone|charge|ammo|missile|torpedo|mineral|moon|planetary|commodity|ore|fuel/i.test(a.groupName ?? '')
+      && a.isBlueprintCopy === undefined },
+]
+
+function formatCategoryAssets(assets: EveAsset[], label: string): string {
+  if (!assets.length) return `No ${label.toLowerCase()} found in inventory.`
+  const byLoc = new Map<string, EveAsset[]>()
+  for (const a of assets) {
+    const slot = byLoc.get(a.locationName) ?? []
+    slot.push(a)
+    byLoc.set(a.locationName, slot)
+  }
+  const sortedLocs = [...byLoc.entries()].sort((a, b) => b[1].length - a[1].length)
+  const totalUnits = assets.reduce((s, a) => s + a.quantity, 0)
+  const lines = [`**${label}** — ${assets.length} types, ${totalUnits.toLocaleString()} units across ${sortedLocs.length} location${sortedLocs.length !== 1 ? 's' : ''}`]
+  for (const [loc, items] of sortedLocs.slice(0, 6)) {
+    lines.push(`\n${loc}`)
+    for (const item of [...items].sort((a, b) => b.quantity - a.quantity).slice(0, 8)) {
+      const bpTag = item.isBlueprintCopy === true ? ' (BPC)' : item.isBlueprintCopy === false ? ' (BPO)' : ''
+      lines.push(`  ${item.typeName}${bpTag} ×${item.quantity.toLocaleString()}`)
+    }
+    if (items.length > 8) lines.push(`  … +${items.length - 8} more types`)
+  }
+  if (sortedLocs.length > 6) lines.push(`\n… +${sortedLocs.length - 6} more locations`)
+  return lines.join('\n')
+}
+
+function formatLocationAssets(assets: EveAsset[], locQuery: string): string {
+  if (!assets.length) return `Nothing found matching "${locQuery}".`
+  const byGroup = new Map<string, EveAsset[]>()
+  for (const a of assets) {
+    const key = a.groupName ?? 'Miscellaneous'
+    const slot = byGroup.get(key) ?? []
+    slot.push(a)
+    byGroup.set(key, slot)
+  }
+  const sortedGroups = [...byGroup.entries()].sort((a, b) => b[1].length - a[1].length)
+  const totalUnits = assets.reduce((s, a) => s + a.quantity, 0)
+  const locLabel = assets[0].locationName
+  const lines = [`**${locLabel}** — ${assets.length} types, ${totalUnits.toLocaleString()} units`]
+  for (const [group, items] of sortedGroups.slice(0, 8)) {
+    const groupUnits = items.reduce((s, a) => s + a.quantity, 0)
+    lines.push(`\n${group} (${items.length} types, ${groupUnits.toLocaleString()} units)`)
+    for (const item of [...items].sort((a, b) => b.quantity - a.quantity).slice(0, 5)) {
+      lines.push(`  ${item.typeName} ×${item.quantity.toLocaleString()}`)
+    }
+    if (items.length > 5) lines.push(`  … +${items.length - 5} more`)
+  }
+  if (sortedGroups.length > 8) lines.push(`\n… +${sortedGroups.length - 8} more groups`)
+  return lines.join('\n')
+}
+// ─────────────────────────────────────────────────────────────────────────────
+
 export function useChat(eveContext?: EveContext) {
   const [conversations, setConversations] = useState<Conversation[]>(loadConversations)
   const [activeId, setActiveId] = useState<string | null>(
@@ -239,6 +310,10 @@ You have zero skill, blueprint, attribute, or industry job data in your context.
 - **query_industry**: REQUIRED for any question touching manufacturing jobs, blueprints, ME/TE efficiency, build queues, production times, or build-vs-buy. No exceptions.
 - **query_skills**: REQUIRED for any question touching skill levels, skill points, training queue, time-to-finish, attribute remaps, or skill recommendations. No exceptions.
 
+### Assets
+- **lookup_items**: use whenever the pilot provides a list of specific item names to check (fit, shopping list, manifest). Pass the full list in one call — fast, exact, no AI overhead.
+- **query_assets**: use ONLY for open-ended inventory questions that cannot be answered by lookup_items (e.g. "what ships do I have?", "show everything in G-7WUF", "list my blueprints"). IMPORTANT: if the pilot's question is too vague to produce a useful result (e.g. "check my assets", "what do I have?", "inventory" with no qualifier), do NOT call query_assets — ask the pilot to narrow it down first: specific item names, a location, or a category (ships / modules / blueprints / materials / ammo). A focused query always returns better results.
+
 ### Mail & Contracts
 - **get_mail**: use for ANY question about the pilot's messages — unread mail, what someone sent, reading inbox. Supports filter (all/unread/read) and text search.
 - **get_contracts**: use for ANY question about the pilot's contracts — outstanding deals, courier jobs, expired contracts, what's expiring soon. Filter by status or use "attention" for items needing action.
@@ -312,7 +387,7 @@ If the pilot asks about the game, high scores, strategy, or their current ship t
 
     if (eveContext?.assets?.length) {
       const locationCount = new Set(eveContext.assets.map(a => a.locationName)).size
-      systemDynamic += `\n\n## ASSETS: ${eveContext.assets.length} stacks across ${locationCount} locations. Use query_assets tool for specifics.`
+      systemDynamic += `\n\n## ASSETS: ${eveContext.assets.length} stacks across ${locationCount} locations. Use lookup_items for ANY specific named item query (even a single item — "how much tritanium", "do I have a Hulk"). Use query_assets ONLY for broad open-ended questions that need reasoning (e.g. "what ships are in Jita", "what's in my hangar at X").`
     }
 
     if (eveContext?.industryJobs?.length) {
@@ -433,6 +508,94 @@ If the pilot asks about the game, high scores, strategy, or their current ship t
       timestamp: new Date(),
     }
 
+    // ── Zero-cost broad asset query intercept ────────────────────────────────
+    // Detect vague inventory questions client-side and respond immediately
+    // without hitting the API — eveContext.assets is already in memory.
+    const broadAssetPatterns = [
+      /^(check\s+)?(my\s+)?(assets?|inventory|stuff|things?|items?)\.?$/i,
+      /^what\s+(assets?|stuff|inventory|items?\s+)?(do\s+i\s+have|have\s+i\s+got)\??$/i,
+      /^what\s+(do\s+i\s+own|'?s\s+in\s+(my\s+)?inventory|are\s+my\s+assets?)\??$/i,
+      /^(show|list|display|give me)\s+(me\s+)?(all\s+)?(my\s+)?(assets?|inventory|stuff|everything)\.?$/i,
+      /^(everything|all)\s*(i\s+have|in\s+my\s+inventory)?\.?$/i,
+    ]
+    if (broadAssetPatterns.some(p => p.test(content.trim())) && eveContext?.assets?.length) {
+      const stackCount = eveContext.assets.length.toLocaleString()
+      const locationCount = new Set(eveContext.assets.map((a: { locationName: string }) => a.locationName)).size.toLocaleString()
+      const syntheticReply = `Too broad to query effectively. Narrow it down by one of:\n\n▸ **Location** — e.g. "what do I have in Jita?" or "assets in MB-NKE"\n▸ **Category** — ships, modules, blueprints, materials, ammo, drones\n▸ **Specific items** — give me a list and I'll check with lookup\n\n${stackCount} stacks across ${locationCount} locations — an unfiltered dump won't be useful.`
+      update(convId, c => ({
+        ...c,
+        messages: [...c.messages, { ...assistantMsg, content: syntheticReply }],
+      }))
+      return
+    }
+    // ────────────────────────────────────────────────────────────────────────
+
+    // ── Named-item single lookup intercept ───────────────────────────────────
+    // "how much Tritanium do I have?" / "do I have a Hulk?" — zero API cost.
+    const namedItemMatch = content.match(
+      /^(?:how\s+(?:much|many)\s+)(.+?)\s+(?:do\s+i\s+have|have\s+i\s+got|do\s+i\s+own)\??$/i
+    ) || content.match(
+      /^(?:do\s+i\s+(?:have|own))\s+(?:any\s+|a\s+|an\s+)?(.+?)\??$/i
+    ) || content.match(
+      /^(?:where\s+(?:is|are)\s+my)\s+(.+?)\??$/i
+    )
+    if (namedItemMatch && eveContext?.assets?.length) {
+      const rawName = namedItemMatch[1].trim().toLowerCase()
+      // Don't intercept category words — let the category intercept handle those
+      const isCategoryWord = ASSET_CATEGORIES.some(c => c.queryPattern.test(rawName))
+      if (!isCategoryWord) {
+        const matches = eveContext.assets.filter(a => a.typeName.toLowerCase().includes(rawName))
+        if (matches.length > 0) {
+          const total = matches.reduce((s, a) => s + a.quantity, 0)
+          const byLoc = new Map<string, number>()
+          for (const a of matches) byLoc.set(a.locationName, (byLoc.get(a.locationName) ?? 0) + a.quantity)
+          const locLines = [...byLoc.entries()]
+            .sort((a, b) => b[1] - a[1])
+            .map(([loc, qty]) => `  • ${qty.toLocaleString()} @ ${loc}`)
+            .join('\n')
+          const itemLabel = matches.length === 1 ? matches[0].typeName : `items matching "${rawName}"`
+          const reply = `**${itemLabel}** — ${total.toLocaleString()} total\n\n${locLines}`
+          update(convId, c => ({
+            ...c,
+            messages: [...c.messages, { ...assistantMsg, content: reply }],
+          }))
+          return
+        }
+      }
+    }
+    // ─────────────────────────────────────────────────────────────────────────
+
+    // ── Category & location query intercepts (Option 5) ───────────────────
+    // Only fires when the query is clearly about owned assets ("my", "I have", etc.)
+    // to avoid intercepting general knowledge questions like "what ships are good?"
+    const isOwnershipQuery = /\b(my|i\s+have|i\s+own|do\s+i\s+have|i('?ve)?\s+got|what.*have)\b/i.test(content)
+    if (isOwnershipQuery && eveContext?.assets?.length) {
+      const cat = ASSET_CATEGORIES.find(c => c.queryPattern.test(content))
+      if (cat) {
+        const filtered = eveContext.assets.filter(cat.filter)
+        update(convId, c => ({
+          ...c,
+          messages: [...c.messages, { ...assistantMsg, content: formatCategoryAssets(filtered, cat.label) }],
+        }))
+        return
+      }
+
+      // Location query — extract token(s) after "in/at/from" and match against known locationNames
+      const locRaw = content.match(/\b(?:in|at|from)\s+([A-Z0-9][A-Z0-9\-]*(?:\s+[A-Z0-9][A-Z0-9\-]*)*)/i)?.[1]?.trim()
+      if (locRaw) {
+        const locLower = locRaw.toLowerCase()
+        const filtered = eveContext.assets.filter(a => a.locationName.toLowerCase().includes(locLower))
+        if (filtered.length > 0) {
+          update(convId, c => ({
+            ...c,
+            messages: [...c.messages, { ...assistantMsg, content: formatLocationAssets(filtered, locRaw) }],
+          }))
+          return
+        }
+      }
+    }
+    // ─────────────────────────────────────────────────────────────────────
+
     update(convId, c => ({ ...c, messages: [...c.messages, assistantMsg] }))
 
     setStreaming(true)
@@ -477,6 +640,7 @@ If the pilot asks about the game, high scores, strategy, or their current ship t
                 const label = parsed.tool.name === 'appraise_items' ? 'QUERYING MARKET PRICES'
                   : parsed.tool.name === 'get_price_history' ? 'FETCHING PRICE HISTORY'
                   : parsed.tool.name === 'query_assets' ? 'SCANNING ASSET INVENTORY'
+                  : parsed.tool.name === 'lookup_items' ? 'CHECKING INVENTORY'
                   : parsed.tool.name.replace(/_/g, ' ').toUpperCase()
                 setToolStatus(parsed.tool.status === 'done' ? null : label)
               }
@@ -652,6 +816,7 @@ If the pilot asks about the game, high scores, strategy, or their current ship t
               const label = parsed.tool.name === 'appraise_items' ? 'QUERYING MARKET PRICES'
                 : parsed.tool.name === 'get_price_history' ? 'FETCHING PRICE HISTORY'
                 : parsed.tool.name === 'query_assets' ? 'SCANNING ASSET INVENTORY'
+                : parsed.tool.name === 'lookup_items' ? 'CHECKING INVENTORY'
                 : parsed.tool.name.replace(/_/g, ' ').toUpperCase()
               setToolStatus(parsed.tool.status === 'done' ? null : label)
             }

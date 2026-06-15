@@ -50,13 +50,11 @@ export default function Aurora({ isSpeaking, characterName, voiceEnabled, onTogg
   const { phase, wakeArmed, isListening, interimText } = voice
   const voiceActive = phase !== 'off'
 
-  // Derive colours for slider + dot from current voice phase
   const knobColor =
     isListening           ? '#ff4444' :
     phase === 'activated' ? '#00d4ff' :
     wakeArmed             ? '#ffd700' :
     '#3a4556'
-
 
   const statusDotColor =
     isSpeaking            ? '#00d4ff' :
@@ -73,18 +71,27 @@ export default function Aurora({ isSpeaking, characterName, voiceEnabled, onTogg
     wakeArmed             ? 'ARMED'             :
     'ONLINE'
 
+  // Border colour for the avatar ring — CSS transition handles the change
+  const borderColor = isSpeaking ? '#00d4ff' : voiceActive ? knobColor : '#1a2332'
+
+  // Box-shadow for avatar — static per state, CSS transition animates between them
+  const boxShadow = isSpeaking
+    ? '0 0 30px rgba(0,212,255,0.5), 0 0 60px rgba(0,212,255,0.25)'
+    : voiceActive
+    ? `0 0 20px ${knobColor}55, 0 0 40px ${knobColor}22`
+    : '0 0 15px rgba(0,212,255,0.1), 0 0 30px rgba(0,212,255,0.05)'
+
   return (
     <div className="flex flex-col items-center gap-3 py-4 select-none">
       {/* Rings + Avatar */}
       <div className="relative flex items-center justify-center w-36 h-36">
-        {/* Outer ambient ring */}
-        <motion.div
+        {/* Outer ambient ring — CSS animation, off JS thread */}
+        <div
           className="absolute inset-0 rounded-full border border-eve-cyan/10"
-          animate={{ scale: [1, 1.05, 1], opacity: [0.3, 0.6, 0.3] }}
-          transition={{ duration: 3, repeat: Infinity, ease: 'easeInOut' }}
+          style={{ animation: 'aurora-ring 3s ease-in-out infinite' }}
         />
 
-        {/* Speaking pulse rings */}
+        {/* Speaking pulse rings — Framer Motion, only mount when speaking */}
         <AnimatePresence>
           {isSpeaking && (
             <>
@@ -107,7 +114,7 @@ export default function Aurora({ isSpeaking, characterName, voiceEnabled, onTogg
           )}
         </AnimatePresence>
 
-        {/* Listening rings */}
+        {/* Listening rings — Framer Motion, only mount when active */}
         <AnimatePresence>
           {voiceActive && !isSpeaking && (
             <>
@@ -126,35 +133,28 @@ export default function Aurora({ isSpeaking, characterName, voiceEnabled, onTogg
           )}
         </AnimatePresence>
 
-        {/* Avatar container */}
-        <motion.div
+        {/* Avatar container — CSS transition for border/glow, no JS animation loop */}
+        <div
           className="relative w-28 h-28 rounded-full overflow-hidden border-2 z-10"
-          animate={{
-            borderColor: isSpeaking ? '#00d4ff' : voiceActive ? knobColor : '#1a2332',
-            boxShadow: isSpeaking
-              ? ['0 0 20px rgba(0,212,255,0.4), 0 0 60px rgba(0,212,255,0.2)',
-                 '0 0 40px rgba(0,212,255,0.7), 0 0 80px rgba(0,212,255,0.3)',
-                 '0 0 20px rgba(0,212,255,0.4), 0 0 60px rgba(0,212,255,0.2)']
-              : voiceActive
-              ? [`0 0 18px ${knobColor}33, 0 0 36px ${knobColor}18`,
-                 `0 0 28px ${knobColor}55, 0 0 56px ${knobColor}28`,
-                 `0 0 18px ${knobColor}33, 0 0 36px ${knobColor}18`]
-              : ['0 0 15px rgba(0,212,255,0.1), 0 0 30px rgba(0,212,255,0.05)',
-                 '0 0 25px rgba(0,212,255,0.2), 0 0 50px rgba(0,212,255,0.1)',
-                 '0 0 15px rgba(0,212,255,0.1), 0 0 30px rgba(0,212,255,0.05)'],
+          style={{
+            borderColor,
+            boxShadow,
+            transition: 'border-color 0.4s ease, box-shadow 0.4s ease',
           }}
-          transition={{ duration: isSpeaking ? 0.8 : voiceActive ? 1.2 : 3, repeat: Infinity, ease: 'easeInOut' }}
         >
           <div className="w-full h-full relative overflow-hidden">
             <AuroraImage />
-            <motion.div
+            {/* Scanline — CSS animation, off JS thread */}
+            <div
               className="absolute inset-x-0 pointer-events-none"
-              style={{ height: '30%', background: 'linear-gradient(180deg, transparent, rgba(0,212,255,0.07), transparent)' }}
-              animate={{ y: ['-100%', '300%'] }}
-              transition={{ duration: 2.5, repeat: Infinity, ease: 'linear', repeatDelay: 2 }}
+              style={{
+                height: '30%',
+                background: 'linear-gradient(180deg, transparent, rgba(0,212,255,0.07), transparent)',
+                animation: 'aurora-scanline 4.5s linear infinite',
+              }}
             />
           </div>
-        </motion.div>
+        </div>
 
         {/* Corner brackets */}
         <div className="absolute inset-1 z-20 pointer-events-none">
@@ -164,7 +164,7 @@ export default function Aurora({ isSpeaking, characterName, voiceEnabled, onTogg
           <div className="absolute bottom-0 right-0 w-4 h-4 border-b border-r border-eve-cyan/60" />
         </div>
 
-        {/* Voice toggle — bottom-right of avatar, hidden on comms panel */}
+        {/* Voice toggle */}
         {showVoiceToggle && onToggleVoice && (
           <motion.button
             onClick={onToggleVoice}
@@ -195,20 +195,19 @@ export default function Aurora({ isSpeaking, characterName, voiceEnabled, onTogg
           CAPSULEER INTELLIGENCE SYSTEM
         </div>
 
-        {/* Status row + voice toggle */}
         <div className="flex items-center justify-center gap-2 mt-2">
-          {/* Status dot */}
-          <motion.div
+          {/* Status dot — CSS animation */}
+          <div
             className="w-1.5 h-1.5 rounded-full shrink-0"
-            style={{ backgroundColor: statusDotColor }}
-            animate={{ opacity: [1, 0.4, 1] }}
-            transition={{ duration: isSpeaking || isListening ? 0.5 : 2, repeat: Infinity }}
+            style={{
+              backgroundColor: statusDotColor,
+              animation: `aurora-dot ${isSpeaking || isListening ? '0.5s' : '2s'} ease-in-out infinite`,
+              transition: 'background-color 0.3s ease',
+            }}
           />
           <span className="text-eve-muted text-xs tracking-widest">{statusLabel}</span>
-
         </div>
 
-        {/* Interim transcript — slides in while listening */}
         <AnimatePresence>
           {interimText && (
             <motion.div

@@ -1,5 +1,21 @@
 # Changelog
 
+## [1.0.7] — 2026-06-15
+
+### Added
+- **Smart asset queries** — Aurora now answers asset questions without hitting the AI API for common patterns. Category queries ("what ships do I have?"), location queries ("assets in Jita"), and named-item lookups ("how much Tritanium do I have?") are resolved instantly from in-memory data. Vague broad queries ("check my assets") are intercepted and prompt the pilot to narrow down.
+- **`lookup_items` tool** — new server-side tool for batch exact item-name lookup; used when Aurora checks a fit, shopping list, or manifest against inventory. Much faster and cheaper than `query_assets` for lists of specific items.
+- **Cross-character asset queries** — asset searches now aggregate across all logged-in characters, not just the active one.
+- **Log attachment in feedback** — bug reports now automatically attach the last 200 lines of `aurora.log` to the Discord webhook submission, making it easier to diagnose issues.
+- **Persistent server caches** — blueprint type lookup cache (`bp_type_cache.json`), blueprint data cache (`bp_data_cache.json`), and ESI group name cache (`type_groups.json`) now survive server restarts, eliminating ~325 ESI calls on every cold start after the first.
+- **In-app guide screenshots** — guide images added to `public/guide/` for future help panel.
+
+### Changed
+- NavTabs active indicator replaced Framer Motion `layoutId` animation with a plain CSS opacity transition — eliminates layout jank when switching tabs.
+- Asset sub-agent (`query_assets`) now filters assets to the relevant category or location before passing context to the AI, reducing token usage and improving response accuracy. Filtered count is reported in the system context.
+- Merged arrays (`allAssets`, `allIndustryJobs`, `allMarketOrders`) now computed with `useMemo` to avoid unnecessary re-renders.
+- `query_assets` tool description updated to direct Aurora to prefer `lookup_items` for specific named-item checks.
+
 ## [1.0.6] — 2026-06-14
 
 ### Changed

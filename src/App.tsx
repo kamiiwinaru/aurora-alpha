@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect, useRef, useMemo } from 'react'
 import { buildIntelReport } from './lib/intel-report'
 import { INTEL_SESSION_KEY } from './hooks/useChat'
 import { version } from '../package.json'
@@ -55,6 +55,7 @@ declare global {
       onUpdateDownloaded: (cb: (version: string) => void) => void
       installUpdate: () => void
       captureScreenshot: () => Promise<string | null>
+      readLog: () => Promise<string | null>
       isNoAIMode: () => Promise<boolean>
       clearKeys: (keys: string[], setNoAI?: boolean) => Promise<void>
     }
@@ -99,9 +100,9 @@ export default function App() {
   const eve = useEve()
 
   // Merged arrays across all authenticated characters — used by panels
-  const mergedAssets = Object.values(eve.allAssets).flat()
-  const mergedIndustryJobs = Object.values(eve.allIndustryJobs).flat()
-  const mergedMarketOrders = Object.values(eve.allMarketOrders).flat()
+  const mergedAssets       = useMemo(() => Object.values(eve.allAssets).flat(),        [eve.allAssets])
+  const mergedIndustryJobs = useMemo(() => Object.values(eve.allIndustryJobs).flat(),  [eve.allIndustryJobs])
+  const mergedMarketOrders = useMemo(() => Object.values(eve.allMarketOrders).flat(),  [eve.allMarketOrders])
 
   const chat = useChat({
     character: eve.character,
