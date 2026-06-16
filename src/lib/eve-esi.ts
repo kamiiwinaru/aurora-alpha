@@ -250,24 +250,78 @@ export const ACTIVITY_NAMES: Record<number, string> = {
 }
 
 // ── Bulk name resolution (up to 1000 IDs per call) ────────────────────────
+
+// Module-level name cache — survives the session, avoids re-resolving IDs seen before
+const _nameCache = new Map<number, string>()
+
+// In-flight deduplication — concurrent resolveIds calls for overlapping IDs collapse to one POST
+const _inFlight = new Map<string, Promise<Array<{ id: number; name: string }>>>()
+
+async function namesPost(ids: number[]): Promise<Array<{ id: number; name: string }>> {
+  const key = ids.slice().sort((a, b) => a - b).join(',')
+  const existing = _inFlight.get(key)
+  if (existing) return existing
+  const p = fetch(`${ESI_BASE}/universe/names/`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(ids),
+  }).then(res => {
+    if (!res.ok) throw new Error(`${res.status}`)
+    return res.json() as Promise<Array<{ id: number; name: string }>>
+  }).finally(() => _inFlight.delete(key))
+  _inFlight.set(key, p)
+  return p
+}
+
 export async function resolveIds(ids: number[]): Promise<Record<number, string>> {
   if (!ids.length) return {}
   const result: Record<number, string> = {}
-  // Player-owned structure IDs (>1e12) are not supported by /universe/names/ — skip them
-  const resolvable = ids.filter(id => id < 1_000_000_000_000)
+  // Serve from cache first
+  const uncached = ids.filter(id => {
+    if (_nameCache.has(id)) { result[id] = _nameCache.get(id)!; return false }
+    return true
+  })
+  // Player-owned structure IDs (>1e12) are not supported by /universe/names/
+  const resolvable = uncached.filter(id => id < 1_000_000_000_000)
   for (let i = 0; i < resolvable.length; i += 1000) {
     const chunk = resolvable.slice(i, i + 1000)
     try {
-      const res = await fetch(`${ESI_BASE}/universe/names/`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(chunk),
-      })
-      if (res.ok) {
-        const data: Array<{ id: number; name: string }> = await res.json()
-        for (const item of data) result[item.id] = item.name
+      const data = await namesPost(chunk)
+      for (const item of data) { result[item.id] = item.name; _nameCache.set(item.id, item.name) }
+    } catch {
+      // Batch rejected — retry in small groups (not one-by-one) to limit error-budget hit
+      if (chunk.length > 1) {
+        for (let j = 0; j < chunk.length; j += 10) {
+          const sub = chunk.slice(j, j + 10)
+          await Promise.allSettled(sub.map(async id => {
+            try {
+              const data = await namesPost([id])
+              if (data[0]) { result[data[0].id] = data[0].name; _nameCache.set(data[0].id, data[0].name) }
+            } catch { /* skip this id */ }
+          }))
+        }
       }
-    } catch { /* skip failed chunk */ }
+    }
+  }
+  return result
+}
+
+// Resolve inventory type IDs that /universe/names/ doesn't cover (small IDs, SDE-only types).
+// Fetches /universe/types/{id}/ in parallel batches of 20.
+export async function resolveTypeIds(typeIds: number[]): Promise<Record<number, string>> {
+  if (!typeIds.length) return {}
+  const result: Record<number, string> = {}
+  for (let i = 0; i < typeIds.length; i += 20) {
+    const chunk = typeIds.slice(i, i + 20)
+    await Promise.allSettled(
+      chunk.map(id =>
+        fetch(`${ESI_BASE}/universe/types/${id}/`)
+          .then(r => r.ok ? r.json() : null)
+          .then((d: { type_id: number; name: string } | null) => {
+            if (d?.name) result[d.type_id] = d.name
+          })
+      )
+    )
   }
   return result
 }
@@ -488,6 +542,8 @@ export async function getNotifications(characterId: number, token: string) {
   return esiGet<Array<{
     notification_id: number
     type: string
+    sender_id?: number
+    sender_type?: string
     timestamp: string
     text?: string
     is_read?: boolean
@@ -579,6 +635,35 @@ export async function markMailRead(characterId: number, mailId: number, token: s
   if (!res.ok) throw new Error(`ESI markMailRead ${res.status}`)
 }
 
+export async function deleteMail(characterId: number, mailId: number, token: string) {
+  const res = await fetch(`${ESI_BASE}/characters/${characterId}/mail/${mailId}/`, {
+    method: 'DELETE',
+    headers: { Authorization: `Bearer ${token}` },
+  })
+  if (!res.ok) throw new Error(`ESI deleteMail ${res.status}`)
+}
+
+export async function getMailingLists(characterId: number, token: string) {
+  return esiGet<Array<{ mailing_list_id: number; name: string }>>(
+    `/characters/${characterId}/mail/lists/`, token
+  )
+}
+
+export async function getMailHeadersPage(characterId: number, token: string, lastMailId?: number) {
+  const url = lastMailId
+    ? `/characters/${characterId}/mail/?last_mail_id=${lastMailId}`
+    : `/characters/${characterId}/mail/`
+  return esiGet<Array<{
+    mail_id: number
+    subject: string
+    from: number
+    timestamp: string
+    is_read?: boolean
+    recipients: Array<{ recipient_id: number; recipient_type: string }>
+    labels?: number[]
+  }>>(url, token)
+}
+
 // ── Public character info ──────────────────────────────────────────────────
 export async function getPublicCharacterInfo(characterId: number) {
   return esiGet<{
@@ -593,12 +678,14 @@ export async function getPublicCharacterInfo(characterId: number) {
   }>(`/characters/${characterId}/`)
 }
 
-export function formatISK(value: number): string {
-  if (value >= 1e12) return `${(value / 1e12).toFixed(2)}T`
-  if (value >= 1e9) return `${(value / 1e9).toFixed(2)}B`
-  if (value >= 1e6) return `${(value / 1e6).toFixed(2)}M`
-  if (value >= 1e3) return `${(value / 1e3).toFixed(2)}K`
-  return value.toFixed(2)
+export function formatISK(value: number, decimals = 2): string {
+  const abs = Math.abs(value)
+  const sign = value < 0 ? '-' : ''
+  if (abs >= 1e12) return `${sign}${(abs / 1e12).toFixed(decimals)}T`
+  if (abs >= 1e9)  return `${sign}${(abs / 1e9).toFixed(decimals)}B`
+  if (abs >= 1e6)  return `${sign}${(abs / 1e6).toFixed(decimals)}M`
+  if (abs >= 1e3)  return `${sign}${(abs / 1e3).toFixed(decimals)}K`
+  return `${sign}${abs.toFixed(decimals)}`
 }
 
 export function timeUntil(dateStr: string): string {

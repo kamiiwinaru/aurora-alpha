@@ -10,6 +10,8 @@ fits.json
 todos.json
 structures.json
 skills_*.json
+skill_group_cache.json
+eve_skill_groups.json
 .claude/
 scripts/.rebuild-log.txt
 bot/

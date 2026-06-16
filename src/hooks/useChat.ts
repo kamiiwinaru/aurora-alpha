@@ -1,10 +1,12 @@
 import { useState, useCallback, useRef, useEffect } from 'react'
+import { duck, schedulRestore, captureBaseline } from '../lib/spotify/ducker'
+import { isSpotifyConnected, getAccessToken } from '../lib/spotify/client'
 import type {
   Message, Conversation, EveCharacter, EveSkill, EveSkillQueueItem,
   EveIndustryJob, EveMarketOrder, EveAsset,
   EveWalletTransaction, EveWalletJournalEntry, EveBlueprint,
   EveCharacterAttributes, EveImplant, EveJumpClone, EveShipLocation,
-  EveStanding, EveContract, EveMiningEntry, EveKillmail, EveLoyaltyPoint, EveNotification,
+  EveStanding, EveContract, EveMiningEntry, EveKillmail, EveLoyaltyPoint, EveNotification, EveMail,
 } from '../types'
 
 function generateId() {
@@ -75,6 +77,7 @@ interface EveContext {
   notifications?: EveNotification[]
   planets?: Array<{ solarSystemName: string; planetType: string; upgradeLevel: number; numPins: number }>
   calendarEvents?: Array<{ date: string; title: string; response: string }>
+  mail?: EveMail[]
 }
 
 const VOICE_ENABLED_KEY = 'aurora_voice_enabled'
@@ -309,10 +312,12 @@ You have zero skill, blueprint, attribute, or industry job data in your context.
 
 - **query_industry**: REQUIRED for any question touching manufacturing jobs, blueprints, ME/TE efficiency, build queues, production times, or build-vs-buy. No exceptions.
 - **query_skills**: REQUIRED for any question touching skill levels, skill points, training queue, time-to-finish, attribute remaps, or skill recommendations. No exceptions.
+- **check_blueprint_profitability**: REQUIRED whenever the pilot asks "what should I build?", "is X profitable to manufacture?", "which blueprint makes the most ISK?", or provides a list of blueprint names and asks for a build recommendation. CRITICAL: if the pilot has already pasted a list of blueprint names in their message, call this tool IMMEDIATELY with those names — do NOT call query_assets or list_blueprints first, the pilot has already provided the data. Also REQUIRED after calling list_blueprints or query_assets if the pilot's original question was about manufacturing profitability. Pass blueprint NAMES exactly as listed — typeId resolution is handled server-side. Deduplicate first: if the pilot lists "Large Trimark Armor Pump II Blueprint" 15 times, pass it once with runs=15. Methodology: product net sell (after 6.6% taxes) − material buy cost (Jita sell) − job cost (material EIV × effective rate). Job cost = EIV × (SCI × (1 − struct_bonus) + facility_tax + 4% SCC). Default assumptions: SCI 4%, structure bonus 3% (Upwell), facility tax 1%. Use ME/runs from the pilot's data if available, otherwise default me=0, runs=1. Rank results by profit descending and summarise in a compact table: BLUEPRINT | RUNS | SELL NET | MAT COST | JOB COST | PROFIT | MARGIN. If the pilot asks about a specific category (e.g. "rig blueprints"), filter the asset results to matching blueprint names before passing to this tool.
 
 ### Assets
 - **lookup_items**: use whenever the pilot provides a list of specific item names to check (fit, shopping list, manifest). Pass the full list in one call — fast, exact, no AI overhead.
-- **query_assets**: use ONLY for open-ended inventory questions that cannot be answered by lookup_items (e.g. "what ships do I have?", "show everything in G-7WUF", "list my blueprints"). IMPORTANT: if the pilot's question is too vague to produce a useful result (e.g. "check my assets", "what do I have?", "inventory" with no qualifier), do NOT call query_assets — ask the pilot to narrow it down first: specific item names, a location, or a category (ships / modules / blueprints / materials / ammo). A focused query always returns better results.
+- **list_blueprints**: use when the pilot asks to rank or check profitability of their own blueprints (e.g. "which of my rig blueprints in WQH-4K are most profitable?"). Returns a structured name list you can feed directly into check_blueprint_profitability. Accepts optional 'location' (system/structure partial match) and 'category' (keyword like "Rig", "Armor", "Shield") filters. Always prefer this over query_assets when you need blueprint names for profitability analysis.
+- **query_assets**: use ONLY for open-ended inventory questions that cannot be answered by lookup_items (e.g. "what ships do I have?", "show everything in G-7WUF"). NEVER call this tool if the pilot has already provided a list of blueprint or item names in their message — use check_blueprint_profitability or lookup_items on those names directly instead. IMPORTANT: if the pilot's question is too vague to produce a useful result (e.g. "check my assets", "what do I have?", "inventory" with no qualifier), do NOT call query_assets — ask the pilot to narrow it down first.
 
 ### Mail & Contracts
 - **get_mail**: use for ANY question about the pilot's messages — unread mail, what someone sent, reading inbox. Supports filter (all/unread/read) and text search.
@@ -605,6 +610,7 @@ If the pilot asks about the game, high scores, strategy, or their current ship t
     let accumulated = ''
 
     try {
+      const spotifyToken = isSpotifyConnected() ? await getAccessToken().catch(() => undefined) : undefined
       const res = await fetch('/api/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -612,10 +618,9 @@ If the pilot asks about the game, high scores, strategy, or their current ship t
         body: JSON.stringify({
           ...buildSystemPrompt(),
           messages: history.map(m => ({ role: m.role, content: m.content })),
-          // characterId lets the server look up the pre-synced asset cache
           characterId: eveContext?.character?.characterId,
-          // Cache diagnostics: previous response id for this conversation (null on first turn)
           previousMessageId: lastResponseIds.current[convId!] ?? null,
+          spotifyToken,
         }),
       })
 
@@ -686,6 +691,7 @@ If the pilot asks about the game, high scores, strategy, or their current ship t
     // Play TTS after streaming completes (if voice enabled and we have text)
     if (voiceEnabled && accumulated) {
       try {
+        duck().catch(() => {})   // start fade-down concurrently; don't block TTS fetch
         const ttsRes = await fetch('/api/tts', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -706,13 +712,16 @@ If the pilot asks about the game, high scores, strategy, or their current ship t
             ctx.close()
             audioRef.current = null
             setIsSpeaking(false)
+            schedulRestore()
           }
           source.start(0)
         } else {
           setIsSpeaking(false)
+          schedulRestore()
         }
       } catch {
         setIsSpeaking(false)
+        schedulRestore()
       }
     } else {
       setIsSpeaking(false)
@@ -780,6 +789,7 @@ If the pilot asks about the game, high scores, strategy, or their current ship t
     let accumulated = ''
 
     try {
+      const spotifyToken = isSpotifyConnected() ? await getAccessToken().catch(() => undefined) : undefined
       const res = await fetch('/api/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -788,8 +798,8 @@ If the pilot asks about the game, high scores, strategy, or their current ship t
           ...buildSystemPrompt(),
           messages: history.map(m => ({ role: m.role, content: m.content })),
           characterId: eveContext?.character?.characterId,
-          // New conversation — no previous response id
           previousMessageId: null,
+          spotifyToken,
         }),
       })
 
@@ -855,6 +865,7 @@ If the pilot asks about the game, high scores, strategy, or their current ship t
     // TTS playback
     if (voiceEnabled && accumulated) {
       try {
+        duck().catch(() => {})
         const ttsRes = await fetch('/api/tts', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -872,13 +883,16 @@ If the pilot asks about the game, high scores, strategy, or their current ship t
             ctx.close()
             audioRef.current = null
             setIsSpeaking(false)
+            schedulRestore()
           }
           source.start(0)
         } else {
           setIsSpeaking(false)
+          schedulRestore()
         }
       } catch {
         setIsSpeaking(false)
+        schedulRestore()
       }
     } else {
       setIsSpeaking(false)

@@ -20,6 +20,7 @@ import ZkillPanel, { type ZkillTarget } from './components/panels/ZkillPanel'
 import IntelPanel from './components/panels/IntelPanel'
 import RoadmapPanel from './components/panels/RoadmapPanel'
 import MapPanel from './components/panels/MapPanel'
+import PVEPanel from './components/panels/PVEPanel'
 import NotificationsPanel from './components/panels/NotificationsPanel'
 import VoiceBubble from './components/VoiceBubble'
 import VoiceSettingsModal from './components/VoiceSettingsModal'
@@ -33,6 +34,8 @@ import SetupScreen from './components/SetupScreen'
 import { useChat } from './hooks/useChat'
 import { useEve } from './hooks/useEve'
 import type { ActivePanel } from './types'
+import { storeTokens, isSpotifyConnected } from './lib/spotify/client'
+import { captureBaseline } from './lib/spotify/ducker'
 
 // Extend window type for Electron IPC
 declare global {
@@ -75,11 +78,19 @@ export default function App() {
       document.body.dataset.density = density
     }
   }, [])
+
+  // Capture Spotify baseline volume at session start if already connected
+  useEffect(() => {
+    if (isSpotifyConnected()) captureBaseline().catch(() => {})
+  }, [])
   const [setupMissing, setSetupMissing] = useState<string[]>([])
   const [noAIMode, setNoAIMode] = useState(false)
   const [updateState, setUpdateState] = useState<{ version: string; progress?: number; ready: boolean } | null>(null)
   const [activePanel, setActivePanel] = useState<ActivePanel>('chat')
-  const [showLanding, setShowLanding] = useState(true)
+  // Skip landing page when returning from Spotify OAuth (token params present in URL)
+  const [showLanding, setShowLanding] = useState(
+    () => !new URLSearchParams(window.location.search).has('spotify_access_token')
+  )
   const [showVoiceBubble, setShowVoiceBubble] = useState(false)
   const [showVoiceSettings, setShowVoiceSettings] = useState(false)
   const [zkillTarget, setZkillTarget] = useState<ZkillTarget | null>(null)
@@ -256,12 +267,25 @@ export default function App() {
   useEffect(() => {
     const pick = <T,>(arr: T[]) => arr[Math.floor(Math.random() * arr.length)]
     const handler = (e: Event) => {
-      const { urgency, system, jumps, count, characters, ships } = (e as CustomEvent<{ urgency: string; system?: string; jumps?: number; count?: number; characters?: string[]; ships?: string[] }>).detail
+      const { urgency, system, jumps, count, characters, ships } = (e as CustomEvent<{ urgency: 'near' | 'mid' | 'clear'; system?: string; jumps?: number; count?: number; characters?: string[]; ships?: string[] }>).detail
       const j = jumps ?? 0
       const gang = count != null ? ` ${count} additional hostile${count === 1 ? '' : 's'} reported.` : ''
       const gangShort = count != null ? ` Plus ${count} more.` : ''
       const gangFleet = count != null ? ` They've got numbers — ${count} confirmed additional.` : ''
       let text: string
+      if (urgency === 'clear') {
+        text = system ? pick([
+          `${system} is clear.`,
+          `All clear in ${system}.`,
+          `${system} clears. You're good.`,
+          `Intel shows ${system} clear. Stand down.`,
+        ]) : pick([
+          `System clear.`,
+          `All clear on intel.`,
+        ])
+        chat.speakAlert(text)
+        return
+      }
       if (system && jumps != null && urgency === 'near') {
         text = pick([
           `Warning. Hostile contact in ${system}. ${j} jump${j === 1 ? '' : 's'} from your position.${gang} Get safe.`,
@@ -341,6 +365,19 @@ export default function App() {
     window.electronAPI?.onUpdateAvailable(version => setUpdateState({ version, ready: false }))
     window.electronAPI?.onUpdateProgress(percent => setUpdateState(s => s ? { ...s, progress: percent } : null))
     window.electronAPI?.onUpdateDownloaded(version => setUpdateState({ version, ready: true }))
+  }, [])
+
+  // Spotify callback — server exchanges PKCE and redirects to /?spotify_access_token=...
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search)
+    const accessToken  = params.get('spotify_access_token')
+    const refreshToken = params.get('spotify_refresh_token')
+    const expiresIn    = params.get('spotify_expires_in')
+    if (!accessToken || !refreshToken || !expiresIn) return
+    window.history.replaceState({}, '', '/')
+    storeTokens({ access_token: accessToken, refresh_token: refreshToken, expires_in: Number(expiresIn) })
+    window.dispatchEvent(new CustomEvent('aurora_spotify_connected'))
+    captureBaseline().catch(() => {})
   }, [])
 
   useEffect(() => {
@@ -698,6 +735,7 @@ export default function App() {
               <NotificationsPanel
                 mail={eve.mail}
                 mailLabels={eve.mailLabels}
+                mailingLists={eve.mailingLists}
                 notifications={eve.notifications}
                 loading={eve.loading}
                 onRefresh={eve.refreshAllCharacters}
@@ -714,93 +752,98 @@ export default function App() {
                 }}
               />
             </div>
+            <div className={`flex-1 overflow-y-auto p-4 ${activePanel === 'pve' ? '' : 'hidden'}`}>
+              <PVEPanel characters={eve.characters} />
+            </div>
 
-            {activePanel === 'chat' ? (
-              <>
-                <ChatWindow
-                  messages={chat.activeConversation?.messages ?? []}
-                  streaming={chat.streaming}
-                  toolStatus={chat.toolStatus}
-                  onEditMessage={handleEditMessage}
-                  noAIMode={noAIMode}
-                />
-                <ChatInput
-                  onSend={handleSend}
-                  onStop={chat.stopStreaming}
-                  disabled={chat.streaming}
-                  streaming={chat.streaming}
-                  editValue={editMessage?.content ?? null}
-                  onCancelEdit={() => setEditMessage(null)}
-                  voiceEnabled={chat.voiceEnabled}
-                  onToggleVoice={chat.toggleVoice}
-                  onOpenVoiceSettings={() => setShowVoiceSettings(true)}
-                  autoListenTrigger={chat.autoListenTrigger}
-                  noAIMode={noAIMode}
-                />
-              </>
-            ) : activePanel === 'map' ? (
-              <div className="flex-1 overflow-hidden flex flex-col">
-                <MapPanel
-                  currentSystemName={eve.shipLocation?.solarSystemName ?? null}
-                  jumpBridges={eve.jumpBridges}
-                />
-              </div>
-            ) : activePanel !== 'zkill' && activePanel !== 'intel' && activePanel !== 'janice' && activePanel !== 'notifications' ? (
-              <div className="flex-1 overflow-y-auto p-4">
-                {activePanel === 'skills' && (
-                  <SkillPanel
-                    skills={eve.skills}
-                    skillQueue={eve.skillQueue}
-                    loading={eve.loading}
-                    onRefresh={eve.refreshAllCharacters}
-                    characterId={eve.character?.characterId}
-                  />
-                )}
-                {activePanel === 'industry' && (
-                  <IndustryPanel
-                    jobs={mergedIndustryJobs.length ? mergedIndustryJobs : eve.industryJobs}
-                    loading={eve.loading}
-                    onRefresh={eve.refreshAllCharacters}
-                    freightImport={freightImport}
-                    onFreightImportClear={() => setFreightImport(null)}
-                    blueprintImport={blueprintImport}
-                    onBlueprintImportClear={() => setBlueprintImport(null)}
-                    characterId={eve.character?.characterId}
-                    accessToken={eve.character?.accessToken}
-                    skills={eve.skills}
-                    assets={mergedAssets.length ? mergedAssets : eve.assets}
-                    allIndustryJobs={eve.allIndustryJobs}
-                    characters={eve.characters}
-                  />
-                )}
-                {activePanel === 'assets' && (
-                  <AssetsPanel
-                    assets={mergedAssets.length ? mergedAssets : eve.assets}
-                    blueprints={eve.blueprints}
-                    loading={eve.loading}
-                    characterId={eve.character?.characterId}
-                    onRefresh={eve.refreshAllCharacters}
-                    onBlueprintClick={(bp) => {
-                      setBlueprintImport(bp)
-                      setActivePanel('industry')
-                    }}
-                    noAIMode={noAIMode}
-                  />
-                )}
-                {activePanel === 'market' && (
-                  <MarketPanel
-                    orders={mergedMarketOrders.length ? mergedMarketOrders : eve.marketOrders}
-                    loading={eve.loading}
-                    onRefresh={eve.refreshAllCharacters}
-                    character={eve.character}
-                    characters={eve.characters}
-                    contracts={eve.contracts}
-                    corporationContracts={eve.corporationContracts}
-                  />
-                )}
-                {activePanel === 'roadmap' && <RoadmapPanel />}
-              </div>
-            ) : null}
+            <div className={`flex-1 flex flex-col overflow-hidden ${activePanel === 'chat' ? '' : 'hidden'}`}>
+              <ChatWindow
+                messages={chat.activeConversation?.messages ?? []}
+                streaming={chat.streaming}
+                toolStatus={chat.toolStatus}
+                onEditMessage={handleEditMessage}
+                noAIMode={noAIMode}
+              />
+              <ChatInput
+                onSend={handleSend}
+                onStop={chat.stopStreaming}
+                disabled={chat.streaming}
+                streaming={chat.streaming}
+                editValue={editMessage?.content ?? null}
+                onCancelEdit={() => setEditMessage(null)}
+                voiceEnabled={chat.voiceEnabled}
+                onToggleVoice={chat.toggleVoice}
+                onOpenVoiceSettings={() => setShowVoiceSettings(true)}
+                autoListenTrigger={chat.autoListenTrigger}
+                noAIMode={noAIMode}
+              />
+            </div>
+
+            <div className={`flex-1 overflow-hidden flex flex-col ${activePanel === 'map' ? '' : 'hidden'}`}>
+              <MapPanel
+                currentSystemName={eve.shipLocation?.solarSystemName ?? null}
+                jumpBridges={eve.jumpBridges}
+              />
+            </div>
+
+            <div className={`flex-1 overflow-y-auto p-4 ${activePanel === 'skills' ? '' : 'hidden'}`}>
+              <SkillPanel
+                skills={eve.skills}
+                skillQueue={eve.skillQueue}
+                loading={eve.loading}
+                onRefresh={eve.refreshAllCharacters}
+                characterId={eve.character?.characterId}
+              />
+            </div>
+
+            <div className={`flex-1 overflow-y-auto p-4 ${activePanel === 'industry' ? '' : 'hidden'}`}>
+              <IndustryPanel
+                jobs={mergedIndustryJobs.length ? mergedIndustryJobs : eve.industryJobs}
+                loading={eve.loading}
+                onRefresh={eve.refreshAllCharacters}
+                freightImport={freightImport}
+                onFreightImportClear={() => setFreightImport(null)}
+                blueprintImport={blueprintImport}
+                onBlueprintImportClear={() => setBlueprintImport(null)}
+                characterId={eve.character?.characterId}
+                accessToken={eve.character?.accessToken}
+                skills={eve.skills}
+                assets={mergedAssets.length ? mergedAssets : eve.assets}
+                allIndustryJobs={eve.allIndustryJobs}
+                characters={eve.characters}
+              />
+            </div>
+
+            <div className={`flex-1 overflow-y-auto p-4 ${activePanel === 'assets' ? '' : 'hidden'}`}>
+              <AssetsPanel
+                assets={mergedAssets.length ? mergedAssets : eve.assets}
+                blueprints={eve.blueprints}
+                loading={eve.loading}
+                characterId={eve.character?.characterId}
+                onRefresh={eve.refreshAllCharacters}
+                onBlueprintClick={(bp) => {
+                  setBlueprintImport(bp)
+                  setActivePanel('industry')
+                }}
+                noAIMode={noAIMode}
+              />
+            </div>
+
+            <div className={`flex-1 overflow-y-auto p-4 ${activePanel === 'market' ? '' : 'hidden'}`}>
+              <MarketPanel
+                orders={mergedMarketOrders.length ? mergedMarketOrders : eve.marketOrders}
+                loading={eve.loading}
+                onRefresh={eve.refreshAllCharacters}
+                character={eve.character}
+                characters={eve.characters}
+                contracts={eve.contracts}
+                corporationContracts={eve.corporationContracts}
+              />
+            </div>
+
+            <div className={`flex-1 overflow-y-auto p-4 ${activePanel === 'roadmap' ? '' : 'hidden'}`}>
+              <RoadmapPanel />
+            </div>
           </div>
         </div>
 

@@ -50,9 +50,12 @@ function RoadmapCard({
 
   return (
     <motion.div layout className="eve-panel border border-eve-border/60 overflow-hidden group/card">
-      <button
+      <div
+        role="button"
+        tabIndex={0}
         onClick={() => setOpen(v => !v)}
-        className="w-full flex items-center gap-3 px-4 py-3 text-left hover:bg-eve-border/10 transition-colors"
+        onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') setOpen(v => !v) }}
+        className="w-full flex items-center gap-3 px-4 py-3 text-left hover:bg-eve-border/10 transition-colors cursor-pointer"
       >
         <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${meta.dot}`} />
         <span className="flex-1 text-eve-text text-xs tracking-wide">{item.title}</span>
@@ -77,7 +80,7 @@ function RoadmapCard({
         <span className="text-eve-dim shrink-0">
           {open ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
         </span>
-      </button>
+      </div>
 
       {/* Confirm banner */}
       <AnimatePresence>

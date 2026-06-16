@@ -157,37 +157,49 @@ interface SkillsCacheEntry {
 const skillsCache = new Map<number, SkillsCacheEntry>()
 const SKILLS_SYNC_TTL = 72 * 60 * 60 * 1000
 
-async function resolveSkillGroups(skills: SkillEntry[]): Promise<SkillEntry[]> {
-  const typeIds = [...new Set(skills.map(s => s.skillId))]
-  const groupIdMap: Record<number, number> = {}
+// Master skill group map — typeId → groupName, built once from ESI category 16, stored permanently
+const EVE_SKILL_GROUPS_FILE = join(process.cwd(), 'eve_skill_groups.json')
+let eveSkillGroups: Record<number, string> = (() => {
+  try { return existsSync(EVE_SKILL_GROUPS_FILE) ? JSON.parse(readFileSync(EVE_SKILL_GROUPS_FILE, 'utf8')) : {} }
+  catch { return {} }
+})()
 
-  // Fetch type info in chunks of 20 to be ESI-friendly
-  const chunks: number[][] = []
-  for (let i = 0; i < typeIds.length; i += 20) chunks.push(typeIds.slice(i, i + 20))
-  await Promise.all(chunks.map(chunk =>
-    Promise.all(chunk.map(async typeId => {
+const sleep = (ms: number) => new Promise(r => setTimeout(r, ms))
+
+async function buildSkillGroupsMaster(): Promise<void> {
+  try {
+    console.log('Building EVE skill groups master from ESI category 16...')
+    const catRes = await fetch('https://esi.evetech.net/latest/universe/categories/16/')
+    if (!catRes.ok) { console.warn('Failed to fetch skill category:', catRes.status); return }
+    const { groups: groupIds } = await catRes.json() as { groups: number[] }
+
+    const result: Record<number, string> = {}
+    for (const groupId of groupIds) {
+      await sleep(150)
       try {
-        const r = await fetch(`https://esi.evetech.net/latest/universe/types/${typeId}/`)
-        const d = await r.json() as { group_id?: number }
-        if (d.group_id) groupIdMap[typeId] = d.group_id
+        const r = await fetch(`https://esi.evetech.net/latest/universe/groups/${groupId}/`)
+        if (!r.ok) continue
+        const { name, types } = await r.json() as { name: string; types: number[] }
+        for (const typeId of types) result[typeId] = name
       } catch { /* non-fatal */ }
-    }))
-  ))
+    }
 
-  const uniqueGroupIds = [...new Set(Object.values(groupIdMap))]
-  const groupNameMap: Record<number, string> = {}
-  await Promise.all(uniqueGroupIds.map(async groupId => {
-    try {
-      const r = await fetch(`https://esi.evetech.net/latest/universe/groups/${groupId}/`)
-      const d = await r.json() as { name?: string }
-      if (d.name) groupNameMap[groupId] = d.name
-    } catch { /* non-fatal */ }
-  }))
+    if (Object.keys(result).length > 0) {
+      eveSkillGroups = result
+      writeFileSync(EVE_SKILL_GROUPS_FILE, JSON.stringify(result), 'utf8')
+      console.log(`EVE skill groups master built: ${Object.keys(result).length} skills, ${groupIds.length} groups`)
+    }
+  } catch (err) {
+    console.warn('Skill groups master build failed:', err)
+  }
+}
 
-  return skills.map(s => ({
-    ...s,
-    groupName: groupIdMap[s.skillId] ? (groupNameMap[groupIdMap[s.skillId]] ?? 'Other') : 'Other',
-  }))
+// Build master on startup if missing or empty
+if (Object.keys(eveSkillGroups).length === 0) buildSkillGroupsMaster().catch(() => {})
+else console.log(`EVE skill groups loaded: ${Object.keys(eveSkillGroups).length} skills`)
+
+function resolveSkillGroups(skills: SkillEntry[]): SkillEntry[] {
+  return skills.map(s => ({ ...s, groupName: eveSkillGroups[s.skillId] ?? 'Other' }))
 }
 
 function skillsFilePath(characterId: number) {
@@ -895,6 +907,202 @@ function mapRoute(
   return path[0] === originId ? path : null
 }
 
+// ── Spotify OAuth (server-side PKCE) ─────────────────────────────────────────
+// Verifier lives here so it doesn't cross localStorage origins between
+// localhost:3001 (Electron/Express) and 127.0.0.1:5173 (Vite dev).
+
+const SPOTIFY_CLIENT_ID    = process.env.VITE_SPOTIFY_CLIENT_ID || ''
+const SPOTIFY_REDIRECT_URI = process.env.SPOTIFY_REDIRECT_URI || 'http://127.0.0.1:3001/api/spotify/callback'
+// Where the React app is served from — Vite in dev, Express in prod
+const SPOTIFY_APP_ORIGIN   = process.env.AURORA_DIST_PATH ? '' : 'http://127.0.0.1:5173'
+const SPOTIFY_SCOPES = [
+  'user-read-playback-state', 'user-modify-playback-state', 'user-read-currently-playing',
+  'user-top-read', 'user-read-recently-played', 'playlist-modify-public', 'playlist-modify-private', 'playlist-modify',
+  'user-library-read', 'user-library-modify',
+  'playlist-read-private',
+].join(' ')
+
+// state → verifier, TTL 10 min
+const spotifyPkceMap = new Map<string, string>()
+
+function b64url(buf: Buffer): string {
+  return buf.toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '')
+}
+
+async function spotifyPkceChallenge(verifier: string): Promise<string> {
+  const { createHash } = await import('crypto')
+  return b64url(createHash('sha256').update(verifier).digest())
+}
+
+app.get('/api/spotify/auth-start', async (_req, res) => {
+  if (!SPOTIFY_CLIENT_ID) return res.status(500).json({ error: 'VITE_SPOTIFY_CLIENT_ID not set' })
+  const { randomBytes } = await import('crypto')
+  const verifier  = b64url(randomBytes(96))
+  const challenge = await spotifyPkceChallenge(verifier)
+  const state     = b64url(randomBytes(16))
+  spotifyPkceMap.set(state, verifier)
+  setTimeout(() => spotifyPkceMap.delete(state), 10 * 60 * 1000)
+
+  const params = new URLSearchParams({
+    client_id: SPOTIFY_CLIENT_ID, response_type: 'code',
+    redirect_uri: SPOTIFY_REDIRECT_URI, scope: SPOTIFY_SCOPES,
+    code_challenge_method: 'S256', code_challenge: challenge,
+    state, show_dialog: 'true',
+  })
+  res.json({ url: `https://accounts.spotify.com/authorize?${params}` })
+})
+
+app.get('/api/spotify/callback', async (req, res) => {
+  const { code, state, error } = req.query as Record<string, string>
+  if (error) return res.redirect(`/?spotify_error=${encodeURIComponent(error)}`)
+
+  const verifier = spotifyPkceMap.get(state)
+  if (!verifier) return res.redirect('/?spotify_error=state_mismatch')
+  spotifyPkceMap.delete(state)
+
+  try {
+    const tokenRes = await fetch('https://accounts.spotify.com/api/token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        grant_type: 'authorization_code', code,
+        redirect_uri: SPOTIFY_REDIRECT_URI,
+        client_id: SPOTIFY_CLIENT_ID,
+        code_verifier: verifier,
+      }),
+    })
+    if (!tokenRes.ok) throw new Error(await tokenRes.text())
+    const data = await tokenRes.json() as { access_token: string; refresh_token: string; expires_in: number; scope?: string }
+    console.log('[spotify/callback] granted scopes:', data.scope)
+    const qs = new URLSearchParams({
+      spotify_access_token:  data.access_token,
+      spotify_refresh_token: data.refresh_token,
+      spotify_expires_in:    String(data.expires_in),
+    })
+    if (process.env.ELECTRON_APP === '1' && typeof (global as any).__auroraOAuthCallback === 'function') {
+      ;(global as any).__auroraOAuthCallback(qs.toString())
+      res.send('<html><body style="background:#080b10;color:#00d4ff;font-family:monospace;display:flex;align-items:center;justify-content:center;height:100vh;margin:0">Returning to Aurora...</body></html>')
+    } else {
+      res.redirect(`http://localhost:5173/?${qs}`)
+    }
+  } catch (err) {
+    console.error('Spotify callback error:', err)
+    res.redirect('/?spotify_error=token_exchange_failed')
+  }
+})
+
+app.post('/api/spotify/refresh', async (req, res) => {
+  const { refresh_token } = req.body as { refresh_token?: string }
+  if (!refresh_token) return res.status(400).json({ error: 'refresh_token required' })
+  try {
+    const tokenRes = await fetch('https://accounts.spotify.com/api/token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        grant_type: 'refresh_token', refresh_token,
+        client_id: SPOTIFY_CLIENT_ID,
+      }),
+    })
+    if (!tokenRes.ok) throw new Error(await tokenRes.text())
+    const data = await tokenRes.json()
+    res.json(data)
+  } catch (err) {
+    res.status(500).json({ error: String(err) })
+  }
+})
+
+// ── Spotify tool definitions ───────────────────────────────────────────────
+const SPOTIFY_TOOLS: Anthropic.Tool[] = [
+  {
+    name: 'spotify_play',
+    description: 'Resume Spotify playback on the active device. Use when the user says "play", "resume", "unpause", or similar.',
+    input_schema: { type: 'object' as const, properties: {}, required: [] },
+  },
+  {
+    name: 'spotify_pause',
+    description: 'Pause Spotify playback. Use when the user says "pause", "stop the music", "mute Spotify", or similar.',
+    input_schema: { type: 'object' as const, properties: {}, required: [] },
+  },
+  {
+    name: 'spotify_skip',
+    description: 'Skip to the next or previous track. Use when the user says "skip", "next track", "go back", "previous song", or similar.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        direction: { type: 'string', enum: ['next', 'previous'], description: 'Which direction to skip (default: next)' },
+      },
+      required: [],
+    },
+  },
+  {
+    name: 'spotify_volume',
+    description: 'Set Spotify volume to an absolute level or adjust it relatively. Use when the user says "turn it up/down", "volume to 50", "quieter", "louder", etc.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        absolute: { type: 'number', description: 'Set volume to this exact percentage (0–100).' },
+        delta:    { type: 'number', description: 'Adjust volume by this amount (negative = quieter). Typical step: ±15.' },
+      },
+      required: [],
+    },
+  },
+  {
+    name: 'spotify_queue',
+    description: 'Search for a track and add it to the Spotify queue. Use when the user says "queue", "add to queue", "play X next", or names a specific song to add.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        query: { type: 'string', description: 'Search query — ideally "Artist Title", e.g. "Daft Punk Get Lucky"' },
+      },
+      required: ['query'],
+    },
+  },
+  {
+    name: 'spotify_now_playing',
+    description: 'Get the currently playing track and playback state. Use when the user asks "what\'s playing?", "what song is this?", or similar.',
+    input_schema: { type: 'object' as const, properties: {}, required: [] },
+  },
+  {
+    name: 'spotify_add_to_playlist',
+    description: 'Add the currently playing track (or a searched track) to an existing playlist, or create a new playlist. Use when the user says "add this to my playlist", "save this to X playlist", "create a playlist called X", or similar.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        playlist_name: { type: 'string', description: 'Name of an existing playlist to add to, or name for a new playlist to create' },
+        create_new:    { type: 'boolean', description: 'If true, create a new playlist with playlist_name instead of searching for an existing one' },
+        track_query:   { type: 'string', description: 'Optional: search for a specific track to add. If omitted, adds the currently playing track.' },
+      },
+      required: ['playlist_name'],
+    },
+  },
+  {
+    name: 'spotify_curate',
+    description: 'Aurora DJ mode — generate and queue tracks based on a mood/vibe using the user\'s listening history as context. Use when the user says "play something chill", "queue some focus music", "DJ mode", "surprise me", or describes a vibe.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        prompt:           { type: 'string', description: 'Mood, vibe, or style, e.g. "dark ambient for late-night ratting"' },
+        count:            { type: 'number', description: 'Number of tracks to queue (default 8, max 20)' },
+        save_as_playlist: { type: 'string', description: 'If provided, save queued tracks as a new playlist with this name' },
+      },
+      required: ['prompt'],
+    },
+  },
+]
+
+// ── Spotify API helper (server-side, uses token passed from client) ──────────
+async function spotifyApi<T = unknown>(token: string, path: string, options: RequestInit = {}): Promise<T> {
+  const res = await fetch(`https://api.spotify.com/v1${path}`, {
+    ...options,
+    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', ...(options.headers ?? {}) },
+  })
+  if (res.status === 204 || res.status === 202) return undefined as T
+  if (!res.ok) throw new Error(`Spotify ${path} → ${res.status}: ${await res.text()}`)
+  const ct = res.headers.get('content-type') ?? ''
+  if (!ct.includes('application/json')) return undefined as T
+  return res.json() as Promise<T>
+}
+
 // ── Market tool definitions ────────────────────────────────────────────────
 const MARKET_TOOLS: Anthropic.Tool[] = [
   {
@@ -924,8 +1132,20 @@ const MARKET_TOOLS: Anthropic.Tool[] = [
     },
   },
   {
+    name: 'list_blueprints',
+    description: 'Return a structured list of blueprint names (BPOs and BPCs) from the pilot\'s inventory, optionally filtered by location and/or category keyword. Use this instead of query_assets when you need actual blueprint names to pass to check_blueprint_profitability. Examples: list rig blueprints in WQH-4K, list all T2 blueprints, list manufacturing blueprints in G-7WUF.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        location: { type: 'string', description: 'System or structure name to filter by (partial match, e.g. "WQH-4K"). Omit to include all locations.' },
+        category: { type: 'string', description: 'Keyword to filter blueprint names (e.g. "Rig", "Armor", "Shield"). Omit for all blueprints.' },
+      },
+      required: [],
+    },
+  },
+  {
     name: 'query_assets',
-    description: 'Query the pilot\'s full asset inventory using natural language. Use for open-ended questions like "list all ships", "what materials do I have in Jita?", "show me all blueprints". For checking whether specific named items exist (e.g. from a fit or shopping list), use lookup_items instead — it is faster and cheaper.',
+    description: 'Query the pilot\'s full asset inventory using natural language. Use for open-ended questions like "list all ships", "what materials do I have in Jita?". DO NOT call this tool if the user has already provided a list of blueprint or item names in their message — call check_blueprint_profitability or lookup_items on those names directly instead. For checking whether specific named items exist (e.g. from a fit or shopping list), use lookup_items instead — it is faster and cheaper.',
     input_schema: {
       type: 'object' as const,
       properties: {
@@ -947,6 +1167,32 @@ const MARKET_TOOLS: Anthropic.Tool[] = [
         },
       },
       required: ['items'],
+    },
+  },
+  {
+    name: 'check_blueprint_profitability',
+    description: 'Fetch live Jita sell prices for one or more blueprint products and their materials, then compute profit margin after job costs. Use whenever the pilot asks "what should I build?", "is it worth manufacturing X?", "which of my blueprints is most profitable?", or provides a list of blueprint names asking for a build recommendation. Pass blueprint NAMES exactly as the pilot listed them — the server resolves typeIds automatically. Deduplicate the list before passing (e.g. 15× "Large Trimark Armor Pump II Blueprint" → pass it once with runs=15).',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        blueprints: {
+          type: 'array',
+          description: 'Blueprints to evaluate — deduplicated, name only',
+          items: {
+            type: 'object',
+            properties: {
+              name: { type: 'string', description: 'Exact blueprint name as listed by the pilot, e.g. "Large Trimark Armor Pump II Blueprint"' },
+              me:   { type: 'number', description: 'Material efficiency (0-10, default 0)' },
+              runs: { type: 'number', description: 'Number of runs / copies available (default 1)' },
+            },
+            required: ['name'],
+          },
+        },
+        sci:         { type: 'number', description: 'System Cost Index % (default 4)' },
+        structBonus: { type: 'number', description: 'Structure job cost reduction % (default 3 for Upwell, 0 for NPC station)' },
+        facilityTax: { type: 'number', description: 'Facility tax % (default 1)' },
+      },
+      required: ['blueprints'],
     },
   },
   {
@@ -1380,7 +1626,126 @@ app.get('/api/industry/blueprint/chain', async (req, res) => {
   }
 })
 
-async function executeMarketTool(name: string, input: Record<string, unknown>, characterId?: number, fallbackAssets?: AssetEntry[]): Promise<unknown> {
+async function executeMarketTool(name: string, input: Record<string, unknown>, characterId?: number, fallbackAssets?: AssetEntry[], spotifyToken?: string): Promise<unknown> {
+  // ── Spotify tools ──────────────────────────────────────────────────────────
+  if (name.startsWith('spotify_')) {
+    if (!spotifyToken) return { error: 'Spotify is not connected. Ask the user to link their Spotify account.' }
+
+    if (name === 'spotify_play') {
+      await spotifyApi(spotifyToken, '/me/player/play', { method: 'PUT' })
+      return { ok: true, action: 'play' }
+    }
+
+    if (name === 'spotify_pause') {
+      await spotifyApi(spotifyToken, '/me/player/pause', { method: 'PUT' })
+      return { ok: true, action: 'pause' }
+    }
+
+    if (name === 'spotify_skip') {
+      const dir = (input.direction as string) === 'previous' ? 'previous' : 'next'
+      await spotifyApi(spotifyToken, `/me/player/${dir}`, { method: 'POST' })
+      return { ok: true, action: `skip_${dir}` }
+    }
+
+    if (name === 'spotify_volume') {
+      const player = await spotifyApi<{ device?: { volume_percent: number } }>(spotifyToken, '/me/player')
+      const current = (player as any)?.device?.volume_percent ?? 50
+      let target: number
+      if (typeof input.absolute === 'number') {
+        target = input.absolute
+      } else if (typeof input.delta === 'number') {
+        target = current + input.delta
+      } else {
+        return { error: 'Provide absolute or delta' }
+      }
+      target = Math.max(0, Math.min(100, Math.round(target)))
+      await spotifyApi(spotifyToken, `/me/player/volume?volume_percent=${target}`, { method: 'PUT' })
+      return { ok: true, volume: target }
+    }
+
+    if (name === 'spotify_now_playing') {
+      const player = await spotifyApi<any>(spotifyToken, '/me/player')
+      if (!player || !player.item) return { isPlaying: false, track: null }
+      return {
+        isPlaying:  player.is_playing,
+        track:      `${player.item.artists?.map((a: any) => a.name).join(', ')} — ${player.item.name}`,
+        album:      player.item.album?.name,
+        progressMs: player.progress_ms,
+        volumePct:  player.device?.volume_percent,
+      }
+    }
+
+    if (name === 'spotify_queue') {
+      const query  = String(input.query ?? '')
+      const qs     = new URLSearchParams({ q: query, type: 'track', limit: '5' })
+      const search = await spotifyApi<{ tracks: { items: any[] } }>(spotifyToken, `/search?${qs}`)
+      const track  = search.tracks.items[0]
+      if (!track) return { error: `No track found for "${query}"` }
+      await spotifyApi(spotifyToken, `/me/player/queue?uri=${encodeURIComponent(track.uri)}`, { method: 'POST' })
+      return { ok: true, queued: `${track.artists[0]?.name} — ${track.name}` }
+    }
+
+    if (name === 'spotify_add_to_playlist') {
+      const playlistName = String(input.playlist_name ?? '')
+      const createNew    = Boolean(input.create_new)
+      const trackQuery   = input.track_query ? String(input.track_query) : null
+
+      // Resolve track: search or use now-playing
+      let trackUri: string | null = null
+      let trackLabel = 'current track'
+      if (trackQuery) {
+        const qs = new URLSearchParams({ q: trackQuery, type: 'track', limit: '3' })
+        const search = await spotifyApi<{ tracks: { items: any[] } }>(spotifyToken, `/search?${qs}`)
+        const t = search.tracks.items[0]
+        if (!t) return { error: `No track found for "${trackQuery}"` }
+        trackUri = t.uri
+        trackLabel = `${t.artists[0]?.name} — ${t.name}`
+      } else {
+        const player = await spotifyApi<any>(spotifyToken, '/me/player')
+        if (!player?.item?.uri) return { error: 'Nothing is currently playing' }
+        trackUri   = player.item.uri
+        trackLabel = `${player.item.artists?.[0]?.name} — ${player.item.name}`
+      }
+
+      // Resolve or create playlist
+      let playlistId: string | null = null
+      if (createNew) {
+        const pl = await spotifyApi<{ id: string }>(spotifyToken, '/me/playlists', {
+          method: 'POST',
+          body: JSON.stringify({ name: playlistName, public: false }),
+        })
+        playlistId = pl.id
+      } else {
+        const plData = await spotifyApi<{ items: { id: string; name: string }[] }>(spotifyToken, '/me/playlists?limit=50')
+        const match  = plData.items.find(p => p.name.toLowerCase() === playlistName.toLowerCase())
+        if (!match) return { error: `No playlist named "${playlistName}" found. Try create_new: true to create it.` }
+        playlistId = match.id
+      }
+
+      await spotifyApi(spotifyToken, `/playlists/${playlistId}/items`, {
+        method: 'POST',
+        body: JSON.stringify({ uris: [trackUri] }),
+      })
+      return { ok: true, added: trackLabel, playlist: playlistName }
+    }
+
+    if (name === 'spotify_curate') {
+      // Delegate to the /api/spotify/curate route which has Claude access
+      const curateRes = await fetch(`http://127.0.0.1:${PORT}/api/spotify/curate`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          prompt:          String(input.prompt ?? ''),
+          count:           typeof input.count === 'number' ? Math.min(input.count, 20) : 8,
+          saveAsPlaylist:  input.save_as_playlist ? String(input.save_as_playlist) : undefined,
+          spotifyToken,
+        }),
+      })
+      return curateRes.ok ? curateRes.json() : { error: await curateRes.text() }
+    }
+
+    return { error: `Unknown Spotify tool: ${name}` }
+  }
   if (name === 'plan_route') {
     ensureMapLoaded()
     if (_mapSystems.length === 0) return { error: 'Star map data not loaded — run `node scripts/build-map-data.mjs` first.' }
@@ -1448,6 +1813,218 @@ async function executeMarketTool(name: string, input: Record<string, unknown>, c
         return false
       }).map(b => `${_mapSysById.get(b.fromId)?.n} ↔ ${_mapSysById.get(b.toId)?.n}`),
       route: hops,
+    }
+  }
+
+  if (name === 'check_blueprint_profitability') {
+    const blueprintInputs = (input.blueprints as { name: string; me?: number; runs?: number }[]) ?? []
+    const sci         = Number(input.sci         ?? 4)
+    const structBonus = Number(input.structBonus ?? 3)
+    const facilityTax = Number(input.facilityTax ?? 1)
+    const SCC         = 4
+    const effectiveSCI = sci * (1 - structBonus / 100)
+    const totalRate    = effectiveSCI + facilityTax + SCC
+
+    const JITA_REGION  = 10000002
+    const JITA_STATION = 60003760
+    const SALES_TAX    = 0.036
+    const BROKER       = 0.03
+
+    // Resolve blueprint names → typeIds via Fuzzwork (batched, cached per session)
+    const nameToTypeId = new Map<string, number | null>()
+    const uniqueNames = [...new Set(blueprintInputs.map(b => b.name.trim()))]
+    await Promise.all(uniqueNames.map(async bpName => {
+      try {
+        const r = await fetch(`https://www.fuzzwork.co.uk/api/typeid2.php?typename=${encodeURIComponent(bpName)}`)
+        if (!r.ok) { nameToTypeId.set(bpName, null); return }
+        const data = await r.json() as Array<{ typeID: number; typeName: string }> | { typeID: number; typeName: string }
+        const matches = Array.isArray(data) ? data : [data]
+        const found = matches.find(m => m.typeID && m.typeName?.toLowerCase().includes('blueprint'))
+        nameToTypeId.set(bpName, found?.typeID ?? null)
+      } catch { nameToTypeId.set(bpName, null) }
+    }))
+
+    // Build resolved list, deduplicating by typeId (sum runs across duplicates)
+    const resolvedMap = new Map<number, { name: string; me: number; runs: number }>()
+    for (const bp of blueprintInputs) {
+      const typeId = nameToTypeId.get(bp.name.trim())
+      if (!typeId) continue
+      const existing = resolvedMap.get(typeId)
+      if (existing) {
+        existing.runs += (bp.runs ?? 1)
+      } else {
+        resolvedMap.set(typeId, { name: bp.name.trim(), me: bp.me ?? 0, runs: bp.runs ?? 1 })
+      }
+    }
+    const blueprints = [...resolvedMap.entries()].map(([typeId, v]) => ({ typeId, ...v }))
+
+    const fetchJitaPricesLocal = async (typeIds: number[]) => {
+      const map = new Map<number, { sell: number | null }>()
+      const BATCH = 5
+      for (let i = 0; i < typeIds.length; i += BATCH) {
+        const batch = typeIds.slice(i, i + BATCH)
+        await Promise.all(batch.map(async typeId => {
+          try {
+            const r = await fetch(
+              `https://esi.evetech.net/latest/markets/${JITA_REGION}/orders/?datasource=tranquility&type_id=${typeId}&order_type=all&page=1`,
+              { headers: { Accept: 'application/json' } }
+            )
+            if (!r.ok) { map.set(typeId, { sell: null }); return }
+            const orders: any[] = await r.json()
+            const sells = orders.filter((o: any) => !o.is_buy_order && o.location_id === JITA_STATION).map((o: any) => o.price as number)
+            map.set(typeId, { sell: sells.length ? Math.min(...sells) : null })
+          } catch { map.set(typeId, { sell: null }) }
+        }))
+        if (i + BATCH < typeIds.length) await new Promise(r => setTimeout(r, 150))
+      }
+      return map
+    }
+
+    // Pre-load adjusted prices (cached, 1h TTL)
+    const adjPrices = await getAdjustedPrices()
+
+    const results = await Promise.all(blueprints.map(async bp => {
+      try {
+        const me   = Math.min(10, Math.max(0, bp.me ?? 0))
+        const runs = Math.max(1, bp.runs ?? 1)
+        const bpData = await fetchBlueprintData(bp.typeId)
+        if (!bpData?.manufacturing) return { name: bp.name, error: 'No manufacturing data' }
+
+        const mfg     = bpData.manufacturing
+        const product = Object.values(mfg.products ?? {})[0]
+        if (!product) return { name: bp.name, error: 'No product defined' }
+
+        const meFactor  = (1 - me / 100)
+        const materials = Object.values(mfg.materials ?? {}).map((m: any) => ({
+          typeId: m.type_id,
+          qty:    Math.max(1, Math.ceil(m.quantity * runs * meFactor)),
+        }))
+
+        const allTypeIds = [product.type_id, ...materials.map(m => m.typeId)]
+        const jitaPricesLocal = await fetchJitaPricesLocal(allTypeIds)
+
+        const productSell  = jitaPricesLocal.get(product.type_id)?.sell ?? null
+        const productUnits = (product.quantity ?? 1) * runs
+        const productGross = productSell != null ? productSell * productUnits : null
+        const productNet   = productGross != null ? productGross * (1 - SALES_TAX) * (1 - BROKER) : null
+
+        // matCost = Jita sell price × quantity (what you pay to buy materials)
+        let matCost = 0
+        let matCostKnown = true
+        // eiv = adjusted_price × quantity (CCP's market equilibrium, used for job cost)
+        let eiv = 0
+        let eivKnown = true
+        for (const m of materials) {
+          const sell = jitaPricesLocal.get(m.typeId)?.sell
+          const adj  = adjPrices.get(m.typeId)
+          if (sell == null) matCostKnown = false
+          else matCost += m.qty * sell
+          if (adj == null) eivKnown = false
+          else eiv += m.qty * adj
+        }
+
+        // Correct EVE job cost formula:
+        //   grossSCI = EIV × sci%
+        //   structBonusAmt = grossSCI × structBonus%
+        //   netSCI = grossSCI − structBonusAmt
+        //   jobCost = netSCI + EIV×facTax% + EIV×4%
+        const grossSCI       = eivKnown ? eiv * sci / 100 : null
+        const structBonusAmt = grossSCI != null ? grossSCI * structBonus / 100 : null
+        const netSCI         = grossSCI != null && structBonusAmt != null ? grossSCI - structBonusAmt : null
+        const facTaxAmt      = eivKnown ? eiv * facilityTax / 100 : null
+        const sccAmt         = eivKnown ? eiv * SCC / 100 : null
+        const jobCost        = netSCI != null && facTaxAmt != null && sccAmt != null ? netSCI + facTaxAmt + sccAmt : null
+
+        const profit = productNet != null && matCostKnown && jobCost != null ? productNet - matCost - jobCost : null
+        const margin = profit != null && productNet ? (profit / productNet) * 100 : null
+
+        const fmt = (v: number) => {
+          const abs = Math.abs(v), sign = v < 0 ? '-' : ''
+          if (abs >= 1e9)  return `${sign}${(abs/1e9).toFixed(2)}B`
+          if (abs >= 1e6)  return `${sign}${(abs/1e6).toFixed(2)}M`
+          if (abs >= 1e3)  return `${sign}${(abs/1e3).toFixed(0)}K`
+          return `${sign}${abs.toFixed(0)}`
+        }
+
+        return {
+          blueprint: bp.name,
+          runs,
+          me,
+          eiv:            eivKnown      ? fmt(eiv)         : 'no data',
+          productSell:    productGross  != null ? fmt(productGross)  : 'no data',
+          productSellNet: productNet    != null ? fmt(productNet)    : 'no data',
+          matCost:        matCostKnown           ? fmt(matCost)      : 'incomplete',
+          jobCost:        jobCost       != null ? fmt(jobCost)      : 'no data',
+          profit:         profit        != null ? fmt(profit)       : 'no data',
+          margin:         margin        != null ? `${margin.toFixed(1)}%` : 'no data',
+          jobCostBreakdown: eivKnown && grossSCI != null ? {
+            grossSCI:    fmt(grossSCI),
+            structBonus: structBonusAmt != null ? `-${fmt(structBonusAmt)}` : '0',
+            netSCI:      netSCI != null ? fmt(netSCI) : '0',
+            facilityTax: facTaxAmt != null ? fmt(facTaxAmt) : '0',
+            scc:         sccAmt != null ? fmt(sccAmt) : '0',
+          } : null,
+        }
+      } catch (e) {
+        return { name: bp.name, error: e instanceof Error ? e.message : 'unknown' }
+      }
+    }))
+
+    return {
+      methodology: `EIV (adjusted prices) used for job cost. Job cost = (EIV × SCI% × (1 − struct_bonus%)) + EIV × facTax% + EIV × 4% SCC. Material cost uses Jita sell prices. Product sell net after ${((SALES_TAX + BROKER)*100).toFixed(1)}% taxes.`,
+      assumptions: { sci, structBonus, facilityTax, scc: SCC },
+      results,
+    }
+  }
+
+  if (name === 'list_blueprints') {
+    const location = input.location ? String(input.location).toLowerCase() : null
+    const category = input.category ? String(input.category).toLowerCase() : null
+    const assets = getAllCachedAssets(characterId, fallbackAssets)
+    if (!assets.length) return { error: 'No asset data available — try refreshing EVE data first.' }
+
+    const structureMap = getStructureMap()
+    const resolved = assets.map(a => {
+      const locMatch = a.locationName.match(/(?:^|@ )Location (\d+)/)
+      if (!locMatch) return a
+      const id = Number(locMatch[1])
+      const sname = structureMap.get(id)
+      if (!sname) return a
+      return { ...a, locationName: a.locationName.replace(`Location ${id}`, sname) }
+    })
+
+    const bps = resolved.filter(a => {
+      if (!a.typeName.toLowerCase().includes('blueprint')) return false
+      if (location && !a.locationName.toLowerCase().includes(location)) return false
+      if (category && !a.typeName.toLowerCase().includes(category)) return false
+      return true
+    })
+
+    // Deduplicate by name, summing quantities
+    const nameMap = new Map<string, { quantity: number; locations: string[] }>()
+    for (const a of bps) {
+      const key = a.typeName
+      const ex = nameMap.get(key)
+      if (ex) {
+        ex.quantity += a.quantity
+        if (!ex.locations.includes(a.locationName)) ex.locations.push(a.locationName)
+      } else {
+        nameMap.set(key, { quantity: a.quantity, locations: [a.locationName] })
+      }
+    }
+
+    const list = Array.from(nameMap.entries()).map(([name, v]) => ({
+      name,
+      quantity: v.quantity,
+      locations: v.locations,
+    }))
+
+    return {
+      total: list.length,
+      blueprints: list,
+      note: list.length > 0
+        ? 'Pass these names directly to check_blueprint_profitability to rank by profit.'
+        : 'No matching blueprints found.',
     }
   }
 
@@ -2195,6 +2772,89 @@ app.get('/api/industry/blueprint', async (req, res) => {
   }
 })
 
+// ── Adjusted-price cache (CCP market equilibrium, used for EIV / job cost) ──
+let _adjustedPriceCache: Map<number, number> | null = null
+let _adjustedPriceFetchedAt = 0
+const ADJUSTED_PRICE_TTL = 60 * 60 * 1000 // 1 hour
+
+async function getAdjustedPrices(): Promise<Map<number, number>> {
+  if (_adjustedPriceCache && Date.now() - _adjustedPriceFetchedAt < ADJUSTED_PRICE_TTL) {
+    return _adjustedPriceCache
+  }
+  try {
+    const r = await fetch('https://esi.evetech.net/latest/markets/prices/?datasource=tranquility', {
+      headers: { Accept: 'application/json' },
+    })
+    if (!r.ok) throw new Error(`ESI prices ${r.status}`)
+    const data: { type_id: number; adjusted_price?: number; average_price?: number }[] = await r.json()
+    const map = new Map<number, number>()
+    for (const entry of data) {
+      if (entry.adjusted_price != null) map.set(entry.type_id, entry.adjusted_price)
+    }
+    _adjustedPriceCache = map
+    _adjustedPriceFetchedAt = Date.now()
+    return map
+  } catch {
+    return _adjustedPriceCache ?? new Map()
+  }
+}
+
+// ── Jita price lookup for profitability calc ──────────────────────────────
+// POST /api/industry/jita-prices  { typeIds: number[] }
+// Returns best sell + buy + CCP adjusted_price for each typeId in Jita
+app.post('/api/industry/jita-prices', async (req, res) => {
+  const { typeIds } = req.body as { typeIds: number[] }
+  if (!Array.isArray(typeIds) || typeIds.length === 0) return res.json({ prices: [] })
+
+  const JITA_REGION = 10000002
+  const JITA_STATION = 60003760
+
+  // Fetch adjusted prices in parallel with Jita orders
+  const [adjustedPrices] = await Promise.all([getAdjustedPrices()])
+
+  const results: { typeId: number; bestSell: number | null; bestBuy: number | null; adjustedPrice: number | null }[] = []
+
+  const BATCH = 5
+  for (let i = 0; i < typeIds.length; i += BATCH) {
+    const batch = typeIds.slice(i, i + BATCH)
+    const fetched = await Promise.all(batch.map(async typeId => {
+      try {
+        let page = 1
+        const orders: any[] = []
+        while (true) {
+          const r = await fetch(
+            `https://esi.evetech.net/latest/markets/${JITA_REGION}/orders/?datasource=tranquility&type_id=${typeId}&order_type=all&page=${page}`,
+            { headers: { Accept: 'application/json' } }
+          )
+          if (!r.ok) break
+          const text = await r.text()
+          if (!text || text === 'null') break
+          const chunk = JSON.parse(text)
+          if (!Array.isArray(chunk) || chunk.length === 0) break
+          orders.push(...chunk)
+          const totalPages = parseInt(r.headers.get('X-Pages') ?? '1', 10)
+          if (page >= totalPages) break
+          page++
+        }
+        const sells = orders.filter((o: any) => !o.is_buy_order && o.location_id === JITA_STATION).map((o: any) => o.price as number)
+        const buys  = orders.filter((o: any) =>  o.is_buy_order && o.location_id === JITA_STATION).map((o: any) => o.price as number)
+        return {
+          typeId,
+          bestSell:      sells.length > 0 ? Math.min(...sells) : null,
+          bestBuy:       buys.length  > 0 ? Math.max(...buys)  : null,
+          adjustedPrice: adjustedPrices.get(typeId) ?? null,
+        }
+      } catch {
+        return { typeId, bestSell: null, bestBuy: null, adjustedPrice: adjustedPrices.get(typeId) ?? null }
+      }
+    }))
+    results.push(...fetched)
+    if (i + BATCH < typeIds.length) await new Promise(r => setTimeout(r, 150))
+  }
+
+  return res.json({ prices: results })
+})
+
 // ── Skills sync endpoint ──────────────────────────────────────────────────
 app.post('/api/skills/sync', (req, res) => {
   const { characterId, characterName, skills, queue, attributes } = req.body as {
@@ -2206,21 +2866,25 @@ app.post('/api/skills/sync', (req, res) => {
   const existing = loadSkillsFromDisk(characterId)
   if (existing && Date.now() - existing.syncedAt < SKILLS_SYNC_TTL) {
     skillsCache.set(characterId, existing)
+    // If groups are missing/unresolved, enrich async from persistent cache (no ESI if cache is warm)
+    const needsEnrichment = existing.skills.some(s => !s.groupName || s.groupName === 'Other')
+    if (needsEnrichment && Object.keys(eveSkillGroups).length > 0) {
+      const enriched = resolveSkillGroups(existing.skills)
+      const enrichedEntry = { ...existing, skills: enriched }
+      skillsCache.set(characterId, enrichedEntry)
+      writeFileSync(skillsFilePath(characterId), JSON.stringify(enrichedEntry, null, 2), 'utf8')
+    }
     return res.json({ ok: true, skipped: true, nextSyncAt: new Date(existing.syncedAt + SKILLS_SYNC_TTL).toISOString() })
   }
 
   const entry: SkillsCacheEntry = { skills, queue: queue ?? [], attributes: attributes ?? null, syncedAt: Date.now(), characterName }
   skillsCache.set(characterId, entry)
   writeFileSync(skillsFilePath(characterId), JSON.stringify(entry, null, 2), 'utf8')
-  console.log(`Skills cache updated: ${characterName} (${characterId}) — ${skills.length} skills, resolving groups...`)
-
-  // Resolve group names async — rewrites file and cache when done
-  resolveSkillGroups(skills).then(enriched => {
-    const enrichedEntry = { ...entry, skills: enriched }
-    skillsCache.set(characterId, enrichedEntry)
-    writeFileSync(skillsFilePath(characterId), JSON.stringify(enrichedEntry, null, 2), 'utf8')
-    console.log(`Skills groups resolved: ${characterName} (${characterId})`)
-  }).catch(err => console.warn('Skills group resolution failed:', err))
+  const enriched = resolveSkillGroups(skills)
+  const enrichedEntry = { ...entry, skills: enriched }
+  skillsCache.set(characterId, enrichedEntry)
+  writeFileSync(skillsFilePath(characterId), JSON.stringify(enrichedEntry, null, 2), 'utf8')
+  console.log(`Skills cache updated: ${characterName} (${characterId}) — ${skills.length} skills`)
 
   return res.json({ ok: true, skills: skills.length, queue: queue?.length ?? 0 })
 })
@@ -2280,13 +2944,47 @@ app.post('/api/mail/read', async (req, res) => {
     body: JSON.stringify({ read: true }),
   })
   if (!r.ok) return res.status(r.status).json({ error: `ESI ${r.status}` })
-  // Update cache
   const entry = mailCache.get(characterId)
   if (entry) {
     const m = entry.mails.find(x => x.mailId === mailId)
     if (m) m.isRead = true
   }
   return res.json({ ok: true })
+})
+
+// ── Delete mail ───────────────────────────────────────────────────────────
+app.post('/api/mail/delete', async (req, res) => {
+  const { characterId, mailId, token } = req.body as { characterId: number; mailId: number; token: string }
+  if (!characterId || !mailId || !token) return res.status(400).json({ error: 'characterId, mailId, token required' })
+  const r = await fetch(`https://esi.evetech.net/latest/characters/${characterId}/mail/${mailId}/`, {
+    method: 'DELETE',
+    headers: { Authorization: `Bearer ${token}` },
+  })
+  if (!r.ok) return res.status(r.status).json({ error: `ESI ${r.status}` })
+  const entry = mailCache.get(characterId)
+  if (entry) entry.mails = entry.mails.filter(x => x.mailId !== mailId)
+  return res.json({ ok: true })
+})
+
+// ── Mailing lists proxy ───────────────────────────────────────────────────
+app.post('/api/mail/lists', async (req, res) => {
+  const { characterId, token } = req.body as { characterId: number; token: string }
+  if (!characterId || !token) return res.status(400).json({ error: 'characterId and token required' })
+  const r = await fetch(`https://esi.evetech.net/latest/characters/${characterId}/mail/lists/`, {
+    headers: { Authorization: `Bearer ${token}` },
+  })
+  if (!r.ok) return res.status(r.status).json({ error: `ESI ${r.status}` })
+  return res.json(await r.json())
+})
+
+// ── Load more mail (pagination) ───────────────────────────────────────────
+app.post('/api/mail/more', async (req, res) => {
+  const { characterId, token, lastMailId } = req.body as { characterId: number; token: string; lastMailId: number }
+  if (!characterId || !token || !lastMailId) return res.status(400).json({ error: 'characterId, token, lastMailId required' })
+  const url = `https://esi.evetech.net/latest/characters/${characterId}/mail/?last_mail_id=${lastMailId}`
+  const r = await fetch(url, { headers: { Authorization: `Bearer ${token}` } })
+  if (!r.ok) return res.status(r.status).json({ error: `ESI ${r.status}` })
+  return res.json(await r.json())
 })
 
 // ── Contracts sync endpoint ───────────────────────────────────────────────
@@ -2299,7 +2997,8 @@ app.post('/api/contracts/sync', (req, res) => {
 
 // ── Chat endpoint (SSE streaming + agentic tool loop) ──────────────────────
 app.post('/api/chat', async (req, res) => {
-  const { messages, system, systemStatic, systemDynamic, characterId, assetContext, previousMessageId } = req.body as {
+  console.log('[chat] POST /api/chat hit')
+  const { messages, system, systemStatic, systemDynamic, characterId, assetContext, previousMessageId, spotifyToken } = req.body as {
     messages: Anthropic.MessageParam[]
     system?: string
     systemStatic?: string
@@ -2307,6 +3006,7 @@ app.post('/api/chat', async (req, res) => {
     characterId?: number
     assetContext?: AssetEntry[]
     previousMessageId?: string | null
+    spotifyToken?: string
   }
 
   if (!messages || !Array.isArray(messages)) {
@@ -2320,6 +3020,17 @@ app.post('/api/chat', async (req, res) => {
   const apiMessages: Anthropic.MessageParam[] = [...messages]
 
   let lastResponseId: string | null = null
+
+  // Detect if user pasted a list of blueprint names — force the right tool on first turn
+  const lastUserMsg = [...messages].reverse().find(m => m.role === 'user')
+  const lastUserText = typeof lastUserMsg?.content === 'string'
+    ? lastUserMsg.content
+    : Array.isArray(lastUserMsg?.content)
+      ? lastUserMsg.content.filter((b: any) => b.type === 'text').map((b: any) => b.text).join(' ')
+      : ''
+  const blueprintMatches = (lastUserText.match(/\bBlueprint\b/gi) ?? []).length
+  let forcedFirstTool: string | null = blueprintMatches >= 3 ? 'check_blueprint_profitability' : null
+  console.log(`[chat] blueprint matches: ${blueprintMatches}, forcing: ${forcedFirstTool}`)
 
   try {
     // Agentic loop: keep going until Claude stops requesting tools
@@ -2340,12 +3051,18 @@ app.post('/api/chat', async (req, res) => {
             },
           ]
 
+      const toolChoice = forcedFirstTool
+        ? { type: 'tool' as const, name: forcedFirstTool }
+        : { type: 'auto' as const }
+      forcedFirstTool = null // only force on the first turn
+
       const stream = (anthropic.messages as any).stream({
         model: 'claude-sonnet-4-6',
         max_tokens: 2048,
         system: systemBlocks,
         messages: apiMessages,
-        tools: MARKET_TOOLS,
+        tools: [...MARKET_TOOLS, ...(spotifyToken ? SPOTIFY_TOOLS : [])],
+        tool_choice: toolChoice,
       })
 
       // Track tool_use blocks as they accumulate
@@ -2385,7 +3102,7 @@ app.post('/api/chat', async (req, res) => {
         res.write(`data: ${JSON.stringify({ tool: { name: tu.name, status: 'executing' } })}\n\n`)
         let parsed: Record<string, unknown> = {}
         try { parsed = JSON.parse(tu.inputStr || '{}') } catch { /* empty input */ }
-        const result = await executeMarketTool(tu.name, parsed, characterId, assetContext)
+        const result = await executeMarketTool(tu.name, parsed, characterId, assetContext, spotifyToken)
         toolResults.push({ type: 'tool_result', tool_use_id: tu.id, content: JSON.stringify(result) })
         res.write(`data: ${JSON.stringify({ tool: { name: tu.name, status: 'done' } })}\n\n`)
       }
@@ -2452,7 +3169,7 @@ app.post('/api/chat/sync', async (req, res) => {
         max_tokens: 2048,
         system: systemBlocks,
         messages: apiMessages,
-        tools: MARKET_TOOLS,
+        tools: [...MARKET_TOOLS, ...(spotifyToken ? SPOTIFY_TOOLS : [])],
       })
 
       const toolUses: Array<{ id: string; name: string; inputStr: string }> = []
@@ -2486,7 +3203,7 @@ app.post('/api/chat/sync', async (req, res) => {
       for (const tu of toolUses) {
         let parsed: Record<string, unknown> = {}
         try { parsed = JSON.parse(tu.inputStr || '{}') } catch { /* empty */ }
-        const result = await executeMarketTool(tu.name, parsed, characterId, assetContext)
+        const result = await executeMarketTool(tu.name, parsed, characterId, assetContext, spotifyToken)
         toolResults.push({ type: 'tool_result', tool_use_id: tu.id, content: JSON.stringify(result) })
       }
 
@@ -3258,7 +3975,7 @@ function parseEveLog(text: string) {
     const n = (idCount.get(baseId) ?? 0) + 1
     idCount.set(baseId, n)
     entries.push({
-      id: n === 1 ? baseId : `${baseId}-${n}`,
+      id: `${baseId}-${n}`,
       timestamp: ts.replace(/\./g, '-').replace(' ', 'T') + 'Z',
       character: char,
       message: message.trim(),
@@ -3381,6 +4098,7 @@ const intelFileOffsets = new Map<string, number>()  // filename → last byte se
 const intelLineBuffers = new Map<string, string>()  // filename → partial trailing line
 const intelChanNames   = new Map<string, string>()  // filename → cached channel name
 let   intelDirWatcher: FSWatcher | null = null
+let   intelPollTimer:  ReturnType<typeof setInterval> | null = null
 
 function intelFilesForClient(listener: string | null, watchNames: string[]): string[] {
   try {
@@ -3440,7 +4158,7 @@ function parseNewIntelLines(filename: string) {
       const baseId = `${ts}-${char}`
       const n = (idCount.get(baseId) ?? 0) + 1
       idCount.set(baseId, n)
-      results.push({ id: n === 1 ? baseId : `${baseId}-${n}`, timestamp: ts.replace(/\./g, '-').replace(' ', 'T') + 'Z', character: char, message: message.trim(), category: categoriseMsg(message), channelName })
+      results.push({ id: `${baseId}-${n}`, timestamp: ts.replace(/\./g, '-').replace(' ', 'T') + 'Z', character: char, message: message.trim(), category: categoriseMsg(message), channelName })
     }
     return results
   } catch { return [] }
@@ -3459,18 +4177,15 @@ function intelBroadcast(filename: string) {
 }
 
 function startIntelWatcher() {
-  if (intelDirWatcher) return
-  try {
-    intelDirWatcher = fsWatch(CHATLOG_DIR, (_evt, filename) => {
-      if (!filename) return
-      // Accept .txt directly, or strip common temp suffixes editors use before rename
-      const target = filename.endsWith('.txt') ? filename
-        : filename.replace(/~$/, '').replace(/\.tmp$/i, '')
-      if (!target.endsWith('.txt')) return
-      setTimeout(() => intelBroadcast(target), 250)
-    })
-    intelDirWatcher.on('error', () => { intelDirWatcher = null })
-  } catch { /* dir may not exist */ }
+  // fsWatch is unreliable on Windows + OneDrive (virtual filesystem).
+  // Poll all tracked files every 3 s instead.
+  if (intelPollTimer) return
+  intelPollTimer = setInterval(() => {
+    if (!intelSseClients.size) return
+    const tracked = new Set<string>()
+    for (const c of intelSseClients) for (const f of c.trackedFiles) tracked.add(f)
+    for (const filename of tracked) intelBroadcast(filename)
+  }, 3000)
 }
 
 app.get('/api/intel-stream', (req, res) => {
@@ -3510,7 +4225,10 @@ app.get('/api/intel-stream', (req, res) => {
   req.on('close', () => {
     clearInterval(heartbeat)
     intelSseClients.delete(client)
-    if (!intelSseClients.size) { intelDirWatcher?.close(); intelDirWatcher = null }
+    if (!intelSseClients.size) {
+      intelDirWatcher?.close(); intelDirWatcher = null
+      if (intelPollTimer) { clearInterval(intelPollTimer); intelPollTimer = null }
+    }
   })
 })
 
@@ -3556,6 +4274,184 @@ app.delete('/api/fits/:id', (req, res) => {
   const fits = loadFits().filter(f => f.id !== req.params.id)
   saveFits(fits)
   return res.json({ ok: true })
+})
+
+// ── Fits cloud sync (Cloudflare Worker proxy) ─────────────────────────────
+const FITS_WORKER_URL = process.env.AURORA_FITS_WORKER_URL?.replace(/\/$/, '') ?? ''
+
+function workerHeaders() {
+  return { 'Content-Type': 'application/json' }
+}
+
+// Push all local fits to Worker (merge: Worker keeps its extras, local wins on conflict)
+app.post('/api/fits/push', async (_req, res) => {
+  if (!FITS_WORKER_URL)
+    return res.status(503).json({ error: 'Cloud sync not configured — add AURORA_FITS_WORKER_URL to .env' })
+  try {
+    const local = loadFits()
+    const r = await fetch(`${FITS_WORKER_URL}/fits/sync`, {
+      method: 'PUT',
+      headers: workerHeaders(),
+      body: JSON.stringify(local),
+    })
+    const data = await r.json()
+    if (!r.ok) return res.status(r.status).json(data)
+    return res.json({ ok: true, pushed: local.length, ...(data as object) })
+  } catch (e) {
+    return res.status(502).json({ error: e instanceof Error ? e.message : 'Worker unreachable' })
+  }
+})
+
+// Pull fits from Worker and merge into local (add Worker-only fits, keep local-only fits)
+app.post('/api/fits/pull', async (_req, res) => {
+  if (!FITS_WORKER_URL)
+    return res.status(503).json({ error: 'Cloud sync not configured — add AURORA_FITS_WORKER_URL to .env' })
+  try {
+    const r = await fetch(`${FITS_WORKER_URL}/fits`, { headers: workerHeaders() })
+    if (!r.ok) return res.status(r.status).json(await r.json())
+    const remote: SavedFit[] = await r.json()
+    const local = loadFits()
+    const localIds = new Set(local.map(f => f.id))
+    const toAdd = remote.filter(f => !localIds.has(f.id))
+    const merged = [...local, ...toAdd]
+    saveFits(merged)
+    return res.json({ ok: true, added: toAdd.length, total: merged.length })
+  } catch (e) {
+    return res.status(502).json({ error: e instanceof Error ? e.message : 'Worker unreachable' })
+  }
+})
+
+// Generate a share token for one or more fits
+app.post('/api/fits/share', async (req, res) => {
+  if (!FITS_WORKER_URL)
+    return res.status(503).json({ error: 'Cloud sync not configured — add AURORA_FITS_WORKER_URL to .env' })
+  const { ids, fitTexts } = req.body as { ids?: string[]; fitTexts?: string[] }
+  let fits: SavedFit[]
+  if (fitTexts?.length) {
+    fits = fitTexts.map(text => ({ id: crypto.randomUUID(), fitText: text, name: text.split('\n')[0]?.replace(/^\[.*?\],\s*/, '').trim() || 'Shared Fit', shipType: text.match(/^\[([^\]]+)/)?.[1] || '', createdAt: new Date().toISOString() }))
+  } else {
+    const all = loadFits()
+    fits = ids?.length ? all.filter(f => ids.includes(f.id)) : all
+  }
+  if (!fits.length) return res.status(400).json({ error: 'No fits to share' })
+  try {
+    const r = await fetch(`${FITS_WORKER_URL}/share`, {
+      method: 'POST',
+      headers: workerHeaders(),
+      body: JSON.stringify(fits),
+    })
+    const data = await r.json()
+    if (!r.ok) return res.status(r.status).json(data)
+    return res.json(data)
+  } catch (e) {
+    return res.status(502).json({ error: e instanceof Error ? e.message : 'Worker unreachable' })
+  }
+})
+
+// Import fits from a share token/URL
+app.post('/api/fits/import-share', async (req, res) => {
+  if (!FITS_WORKER_URL)
+    return res.status(503).json({ error: 'Cloud sync not configured — add AURORA_FITS_WORKER_URL to .env' })
+  const { token } = req.body as { token?: string }
+  if (!token?.trim()) return res.status(400).json({ error: 'token required' })
+  // Accept full URL or bare token
+  const bare = token.trim().split('/').pop()?.toUpperCase() ?? ''
+  try {
+    const r = await fetch(`${FITS_WORKER_URL}/share/${bare}`, { headers: workerHeaders() })
+    const data = await r.json()
+    if (!r.ok) return res.status(r.status).json(data)
+    const incoming: SavedFit[] = Array.isArray(data) ? data : [data]
+    const local = loadFits()
+    const localIds = new Set(local.map(f => f.id))
+    const toAdd = incoming.filter(f => !localIds.has(f.id))
+    saveFits([...local, ...toAdd])
+    return res.json({ ok: true, added: toAdd.length, fits: toAdd })
+  } catch (e) {
+    return res.status(502).json({ error: e instanceof Error ? e.message : 'Worker unreachable' })
+  }
+})
+
+// ── Fit → Blueprint import ─────────────────────────────────────────────────
+// Parses an EFT fit, resolves each item to its blueprint typeId, returns a
+// list ready to load into the Blueprint Planner one-by-one.
+app.post('/api/industry/fit-blueprints', async (req, res) => {
+  const { fitText } = req.body as { fitText?: string }
+  if (!fitText?.trim()) return res.status(400).json({ error: 'fitText required' })
+
+  // Parse EFT — same logic as /api/fit-analyze but preserve quantities
+  const lines = fitText.trim().split('\n').map(l => l.trim())
+  const itemList: Array<{ name: string; qty: number }> = []
+
+  for (const line of lines) {
+    if (!line || line.startsWith('//') || line.startsWith('-')) continue
+    if (line.startsWith('[') && line.includes(',')) {
+      // Header: [Ship Type, Fit Name]
+      const inner = line.slice(1, line.lastIndexOf(']'))
+      const shipType = inner.slice(0, inner.indexOf(',')).trim()
+      if (shipType) itemList.push({ name: shipType, qty: 1 })
+      continue
+    }
+    if (line.startsWith('[')) continue // [Empty slot]
+    const qtyMatch = line.match(/^(.+?)\s+x(\d+)\s*$/)
+    if (qtyMatch) {
+      itemList.push({ name: qtyMatch[1].trim(), qty: parseInt(qtyMatch[2], 10) })
+    } else {
+      itemList.push({ name: line, qty: 1 })
+    }
+  }
+
+  if (itemList.length === 0) return res.status(400).json({ error: 'No items found in fit' })
+
+  // Resolve item names → typeIds via ESI
+  const uniqueNames = [...new Set(itemList.map(i => i.name))]
+  let nameToTypeId = new Map<string, number>()
+  try {
+    const r = await fetch('https://esi.evetech.net/latest/universe/ids/?datasource=tranquility', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(uniqueNames),
+    })
+    if (r.ok) {
+      const data = await r.json() as { inventory_types?: { id: number; name: string }[] }
+      for (const t of data.inventory_types ?? []) nameToTypeId.set(t.name.toLowerCase(), t.id)
+    }
+  } catch { /* proceed with empty map */ }
+
+  // For each unique item, find its blueprint via cache / Fuzzwork
+  const resolvedMap = new Map<string, { itemTypeId: number; bpTypeId: number; blueprintName: string }>()
+  await Promise.all(uniqueNames.map(async name => {
+    const itemTypeId = nameToTypeId.get(name.toLowerCase())
+    if (!itemTypeId) return
+    const bp = await findBpForProduct(itemTypeId, name)
+    if (bp) resolvedMap.set(name, { itemTypeId, bpTypeId: bp.bpTypeId, blueprintName: `${name} Blueprint` })
+  }))
+
+  // Build result list preserving original order, summing qty for duplicates
+  const seen = new Map<string, number>() // name → result index
+  const results: Array<{
+    name: string; qty: number; itemTypeId: number | null
+    blueprintTypeId: number | null; blueprintName: string | null; hasBlueprint: boolean
+  }> = []
+
+  for (const item of itemList) {
+    const existing = seen.get(item.name)
+    if (existing !== undefined) {
+      results[existing].qty += item.qty
+      continue
+    }
+    const resolved = resolvedMap.get(item.name)
+    results.push({
+      name: item.name,
+      qty: item.qty,
+      itemTypeId: resolved?.itemTypeId ?? null,
+      blueprintTypeId: resolved?.bpTypeId ?? null,
+      blueprintName: resolved?.blueprintName ?? null,
+      hasBlueprint: !!resolved,
+    })
+    seen.set(item.name, results.length - 1)
+  }
+
+  return res.json({ items: results })
 })
 
 // ── Pronunciation dictionary ──────────────────────────────────────────────
@@ -4131,6 +5027,408 @@ app.post('/api/tts', async (req, res) => {
   }
 })
 
+
+// ── LP Store ──────────────────────────────────────────────────────────────
+
+interface LpOffer {
+  offer_id: number
+  type_id: number
+  quantity: number
+  lp_cost: number
+  isk_cost: number
+  required_items: Array<{ type_id: number; quantity: number }>
+}
+
+interface LpOfferCache {
+  offers: LpOffer[]
+  fetchedAt: number
+}
+
+const _lpOfferCache = new Map<number, LpOfferCache>()
+const _lpCorpNameCache = new Map<number, string>()
+const _lpTypeNameCache = new Map<number, string>()
+const LP_OFFER_TTL_MS = 60 * 60 * 1000 // 1h
+
+async function fetchLpOffers(corporationId: number): Promise<LpOffer[]> {
+  const cached = _lpOfferCache.get(corporationId)
+  if (cached && Date.now() - cached.fetchedAt < LP_OFFER_TTL_MS) return cached.offers
+  const r = await fetch(`https://esi.evetech.net/latest/loyalty/stores/${corporationId}/offers/?datasource=tranquility`)
+  if (!r.ok) return []
+  const offers: LpOffer[] = await r.json()
+  _lpOfferCache.set(corporationId, { offers, fetchedAt: Date.now() })
+  return offers
+}
+
+async function resolveCorpName(corporationId: number): Promise<string> {
+  if (_lpCorpNameCache.has(corporationId)) return _lpCorpNameCache.get(corporationId)!
+  try {
+    const r = await fetch(`https://esi.evetech.net/latest/corporations/${corporationId}/?datasource=tranquility`)
+    if (!r.ok) return String(corporationId)
+    const data: { name: string } = await r.json()
+    _lpCorpNameCache.set(corporationId, data.name)
+    return data.name
+  } catch { return String(corporationId) }
+}
+
+async function resolveTypeName(typeId: number): Promise<string> {
+  if (_lpTypeNameCache.has(typeId)) return _lpTypeNameCache.get(typeId)!
+  try {
+    const r = await fetch(`https://esi.evetech.net/latest/universe/types/${typeId}/?datasource=tranquility`)
+    if (!r.ok) return String(typeId)
+    const data: { name: string } = await r.json()
+    _lpTypeNameCache.set(typeId, data.name)
+    return data.name
+  } catch { return String(typeId) }
+}
+
+async function janiceAppraise(lines: string): Promise<Map<string, number>> {
+  const prices = new Map<string, number>()
+  const apiKey = process.env.JANICE_API_KEY
+  if (!apiKey || !lines.trim()) return prices
+  try {
+    const url = `https://janice.e-351.com/api/rest/v2/appraisal?designation=appraisal&pricing=split&pricingVariant=immediate&marketName=Jita&raw=1`
+    const r = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/plain; charset=utf-8', 'X-ApiKey': apiKey, 'Accept': 'application/json' },
+      body: lines,
+    })
+    if (!r.ok) return prices
+    const data: { items?: Array<{ itemType?: { name?: string; eid?: number }; effectivePrices?: { sellPrice?: number }; immediatePrices?: { sellPrice?: number }; amount?: number }> } = await r.json()
+    for (const item of data.items ?? []) {
+      const ep = (item.effectivePrices ?? item.immediatePrices ?? {}) as Record<string, number>
+      const name = item.itemType?.name ?? ''
+      if (name) prices.set(name.toLowerCase(), ep.sellPrice ?? 0)
+    }
+  } catch { /* ignore */ }
+  return prices
+}
+
+// POST /api/lp/analyze
+// Body: { characterId, refreshToken }
+// Returns ranked LP store offers across all corps where pilot has LP
+app.post('/api/lp/analyze', async (req, res) => {
+  const { characterId, refreshToken } = req.body as { characterId: number; refreshToken: string }
+  if (!characterId || !refreshToken) return res.status(400).json({ error: 'characterId and refreshToken required' })
+
+  try {
+    // Get a fresh access token
+    const credentials = Buffer.from(`${process.env.EVE_CLIENT_ID}:${process.env.EVE_CLIENT_SECRET}`).toString('base64')
+    const tokenRes = await fetch('https://login.eveonline.com/v2/oauth/token', {
+      method: 'POST',
+      headers: { Authorization: `Basic ${credentials}`, 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({ grant_type: 'refresh_token', refresh_token: refreshToken }),
+    })
+    if (!tokenRes.ok) return res.status(401).json({ error: 'Token refresh failed' })
+    const tokenData: { access_token?: string } = await tokenRes.json()
+    const accessToken = tokenData.access_token
+    if (!accessToken) return res.status(401).json({ error: 'No access token returned' })
+
+    // Fetch LP balances
+    const lpRes = await fetch(`https://esi.evetech.net/latest/characters/${characterId}/loyalty/points/?datasource=tranquility`, {
+      headers: { Authorization: `Bearer ${accessToken}` },
+    })
+    if (!lpRes.ok) return res.status(401).json({ error: 'ESI loyalty fetch failed' })
+    const lpBalances: Array<{ corporation_id: number; loyalty_points: number }> = await lpRes.json()
+    if (!lpBalances.length) return res.json({ balances: [], results: [] })
+
+    // Resolve corp names
+    const balancesWithNames = await Promise.all(lpBalances.map(async b => ({
+      ...b,
+      corp_name: await resolveCorpName(b.corporation_id),
+    })))
+
+    // Fetch offers for each corp (parallel)
+    const allOffers: Array<{ offer: LpOffer; corporation_id: number; corp_name: string; lp_balance: number }> = []
+    await Promise.all(balancesWithNames.map(async b => {
+      const offers = await fetchLpOffers(b.corporation_id)
+      for (const offer of offers) {
+        allOffers.push({ offer, corporation_id: b.corporation_id, corp_name: b.corp_name, lp_balance: b.loyalty_points })
+      }
+    }))
+
+    if (!allOffers.length) return res.json({ balances: balancesWithNames, results: [] })
+
+    // Collect all unique type IDs (output + required items)
+    const typeIds = new Set<number>()
+    for (const { offer } of allOffers) {
+      typeIds.add(offer.type_id)
+      for (const req of offer.required_items) typeIds.add(req.type_id)
+    }
+
+    // Resolve all names in parallel chunks of 20
+    const typeIdArr = [...typeIds]
+    const nameChunks: Array<Array<number>> = []
+    for (let i = 0; i < typeIdArr.length; i += 20) nameChunks.push(typeIdArr.slice(i, i + 20))
+    await Promise.all(nameChunks.map(chunk => Promise.all(chunk.map(id => resolveTypeName(id)))))
+
+    // Build Janice appraisal string: "ItemName qty\n..."
+    const lines: string[] = []
+    for (const id of typeIds) {
+      const name = _lpTypeNameCache.get(id)
+      if (name) lines.push(`${name} 1`)
+    }
+    const priceMap = await janiceAppraise(lines.join('\n'))
+
+    // Compute ISK/LP for each offer
+    type RankedOffer = {
+      offer_id: number
+      corporation_id: number
+      corp_name: string
+      lp_balance: number
+      type_id: number
+      type_name: string
+      quantity: number
+      lp_cost: number
+      isk_cost: number
+      required_items: Array<{ type_id: number; type_name: string; quantity: number; unit_sell: number }>
+      sell_price: number
+      required_cost: number
+      net_isk: number
+      isk_per_lp: number
+    }
+
+    const ranked: RankedOffer[] = []
+    for (const { offer, corporation_id, corp_name, lp_balance } of allOffers) {
+      if (offer.lp_cost <= 0) continue
+      const typeName = _lpTypeNameCache.get(offer.type_id) ?? String(offer.type_id)
+      const unitSell = priceMap.get(typeName.toLowerCase()) ?? 0
+      const sellPrice = unitSell * offer.quantity
+
+      let requiredCost = 0
+      const reqItems = offer.required_items.map(ri => {
+        const riName = _lpTypeNameCache.get(ri.type_id) ?? String(ri.type_id)
+        const riSell = priceMap.get(riName.toLowerCase()) ?? 0
+        const riCost = riSell * ri.quantity
+        requiredCost += riCost
+        return { type_id: ri.type_id, type_name: riName, quantity: ri.quantity, unit_sell: riSell }
+      })
+
+      const netIsk = sellPrice - offer.isk_cost - requiredCost
+      const iskPerLp = netIsk / offer.lp_cost
+
+      ranked.push({
+        offer_id: offer.offer_id,
+        corporation_id,
+        corp_name,
+        lp_balance,
+        type_id: offer.type_id,
+        type_name: typeName,
+        quantity: offer.quantity,
+        lp_cost: offer.lp_cost,
+        isk_cost: offer.isk_cost,
+        required_items: reqItems,
+        sell_price: sellPrice,
+        required_cost: requiredCost,
+        net_isk: netIsk,
+        isk_per_lp: iskPerLp,
+      })
+    }
+
+    ranked.sort((a, b) => b.isk_per_lp - a.isk_per_lp)
+
+    res.json({ balances: balancesWithNames, results: ranked.slice(0, 200) })
+  } catch (err) {
+    console.error('LP analyze error:', err)
+    res.status(500).json({ error: 'LP analysis failed' })
+  }
+})
+
+// ── Spotify curator route ─────────────────────────────────────────────────────
+// Asks Claude (Haiku) to suggest tracks based on listening history, then the
+// caller resolves + queues them. Called internally by executeMarketTool and
+// also directly by curator.ts in the frontend.
+app.get('/api/spotify/playlists', async (req, res) => {
+  const { token } = req.query as { token: string }
+  if (!token) return res.status(400).json({ error: 'missing token' })
+  try {
+    const data = await spotifyApi<{ items: { id: string; name: string; public: boolean; images: { url: string }[] }[] }>(
+      token, '/me/playlists?limit=50'
+    )
+    res.json({ playlists: data?.items ?? [] })
+  } catch (e: any) {
+    console.error('[spotify/playlists]', e.message)
+    res.status(500).json({ error: e.message })
+  }
+})
+
+app.post('/api/spotify/playlists', async (req, res) => {
+  const { token, name, isPublic = false, description = '' } = req.body as { token: string; name: string; isPublic?: boolean; description?: string }
+  if (!token || !name) return res.status(400).json({ error: 'missing token or name' })
+  try {
+    const playlist = await spotifyApi<{ id: string; name: string }>(token, '/me/playlists', {
+      method: 'POST',
+      body: JSON.stringify({ name, public: isPublic, description }),
+    })
+    res.json({ id: playlist.id, name: playlist.name })
+  } catch (e: any) {
+    console.error('[spotify/playlists/create]', e.message)
+    res.status(500).json({ error: e.message })
+  }
+})
+
+app.post('/api/spotify/playlists/:id/tracks', async (req, res) => {
+  const { id } = req.params
+  const { token, trackId } = req.body as { token: string; trackId: string }
+  if (!token || !trackId) return res.status(400).json({ error: 'missing token or trackId' })
+  try {
+    await spotifyApi(token, `/playlists/${id}/items`, {
+      method: 'POST',
+      body: JSON.stringify({ uris: [`spotify:track:${trackId}`] }),
+    })
+    res.json({ ok: true })
+  } catch (e: any) {
+    console.error('[spotify/playlists/add]', e.message)
+    res.status(500).json({ error: e.message })
+  }
+})
+
+app.get('/api/spotify/library/contains', async (req, res) => {
+  const { id, token } = req.query as { id: string; token: string }
+  if (!id || !token) return res.status(400).json({ error: 'missing id or token' })
+  try {
+    const uri = encodeURIComponent(`spotify:track:${id}`)
+    const data = await spotifyApi<boolean[]>(token, `/me/library/contains?uris=${uri}`)
+    res.json({ saved: data?.[0] ?? false })
+  } catch (e: any) {
+    console.error('[spotify/library/contains]', e.message)
+    res.status(500).json({ error: e.message })
+  }
+})
+
+app.put('/api/spotify/library/save', async (req, res) => {
+  const { id, token } = req.body as { id: string; token: string }
+  if (!id || !token) return res.status(400).json({ error: 'missing id or token' })
+  try {
+    const uri = encodeURIComponent(`spotify:track:${id}`)
+    await spotifyApi(token, `/me/library?uris=${uri}`, { method: 'PUT' })
+    res.json({ ok: true })
+  } catch (e: any) {
+    console.error('[spotify/library/save]', e.message)
+    res.status(500).json({ error: e.message })
+  }
+})
+
+app.delete('/api/spotify/library/save', async (req, res) => {
+  const { id, token } = req.body as { id: string; token: string }
+  if (!id || !token) return res.status(400).json({ error: 'missing id or token' })
+  try {
+    const uri = encodeURIComponent(`spotify:track:${id}`)
+    await spotifyApi(token, `/me/library?uris=${uri}`, { method: 'DELETE' })
+    res.json({ ok: true })
+  } catch (e: any) {
+    console.error('[spotify/library/unsave]', e.message)
+    res.status(500).json({ error: e.message })
+  }
+})
+
+app.post('/api/spotify/curate', async (req, res) => {
+  const { prompt, count = 8, saveAsPlaylist, spotifyToken } = req.body as {
+    prompt: string
+    count?: number
+    saveAsPlaylist?: string
+    spotifyToken: string
+  }
+  if (!prompt)        return res.status(400).json({ error: 'prompt required' })
+  if (!spotifyToken)  return res.status(400).json({ error: 'spotifyToken required' })
+
+  try {
+    // Fetch listening context from Spotify
+    const [recentRaw, topRaw] = await Promise.all([
+      spotifyApi<{ items: { track: any }[] }>(spotifyToken, '/me/player/recently-played?limit=20'),
+      spotifyApi<{ items: any[] }>(spotifyToken, '/me/top/tracks?time_range=medium_term&limit=20'),
+    ])
+    const fmt = (t: any) => `${t.artists?.[0]?.name ?? 'Unknown'} – ${t.name}`
+    const recentLines = (recentRaw.items ?? []).slice(0, 10).map(i => fmt(i.track)).join('\n')
+    const topLines    = (topRaw.items   ?? []).slice(0, 10).map(fmt).join('\n')
+    const context     = `Recently played:\n${recentLines}\n\nTop tracks (medium term):\n${topLines}`
+
+    // Ask Haiku for suggestions
+    const suggestion = await anthropic.messages.create({
+      model: 'claude-haiku-4-5-20251001',
+      max_tokens: 512,
+      system: 'You are a music curator. Given a user\'s listening history and a mood/vibe prompt, suggest tracks. Reply ONLY with a JSON array: [{"artist":"...","title":"..."}]. No prose, no markdown, just the array. Max 20 items.',
+      messages: [{ role: 'user', content: `Listening history:\n${context}\n\nMood/vibe: ${prompt}\n\nSuggest ${count} tracks.` }],
+    })
+    accumulateUsage(suggestion.usage)
+
+    const raw = suggestion.content[0].type === 'text' ? suggestion.content[0].text.trim() : '[]'
+    let suggestions: { artist: string; title: string }[] = []
+    try {
+      const match = raw.match(/\[[\s\S]*\]/)
+      suggestions = match ? JSON.parse(match[0]) : []
+    } catch { suggestions = [] }
+
+    // Resolve active device so queue calls land on the right player
+    let activeDeviceId: string | undefined
+    try {
+      const player = await spotifyApi<any>(spotifyToken, '/me/player')
+      activeDeviceId = player?.device?.id ?? undefined
+    } catch { /* no active player — queue without device_id and let Spotify pick */ }
+
+    // Resolve via search and queue
+    const queued: string[]  = []
+    const skipped: string[] = []
+    const errors: string[]  = []
+
+    for (const s of suggestions.slice(0, count)) {
+      const query = `${s.artist} ${s.title}`
+      const qs    = new URLSearchParams({ q: query, type: 'track', limit: '5' })
+      try {
+        const search = await spotifyApi<{ tracks: { items: any[] } }>(spotifyToken, `/search?${qs}`)
+        const track  = search.tracks.items[0]
+        if (!track) { skipped.push(query); continue }
+
+        const queueQs = activeDeviceId ? `?uri=${encodeURIComponent(track.uri)}&device_id=${activeDeviceId}` : `?uri=${encodeURIComponent(track.uri)}`
+        await spotifyApi(spotifyToken, `/me/player/queue${queueQs}`, { method: 'POST' })
+        queued.push(`${track.artists[0]?.name} — ${track.name}`)
+      } catch (err: any) {
+        const msg = err?.message ?? String(err)
+        console.error(`[spotify/curate] queue failed for "${query}": ${msg}`)
+        errors.push(`${query}: ${msg}`)
+        skipped.push(query)
+      }
+    }
+
+    // Optionally save as playlist
+    let playlistId: string | null = null
+    if (saveAsPlaylist && queued.length > 0) {
+      const pl = await spotifyApi<{ id: string }>(spotifyToken, '/me/playlists', {
+        method: 'POST',
+        body: JSON.stringify({ name: saveAsPlaylist, description: `Aurora DJ · ${prompt}`, public: false }),
+      })
+      playlistId = pl.id
+      // Re-search to get URIs for playlist (we only queued, didn't store URIs above)
+      const uris: string[] = []
+      for (const label of queued) {
+        const qs = new URLSearchParams({ q: label, type: 'track', limit: '1' })
+        try {
+          const s = await spotifyApi<{ tracks: { items: any[] } }>(spotifyToken, `/search?${qs}`)
+          if (s.tracks.items[0]) uris.push(s.tracks.items[0].uri)
+        } catch { /* skip */ }
+      }
+      if (uris.length > 0) {
+        await spotifyApi(spotifyToken, `/playlists/${playlistId}/tracks`, {
+          method: 'POST',
+          body: JSON.stringify({ uris }),
+        })
+      }
+    }
+
+    res.json({ queued, skipped, errors, playlistId })
+  } catch (err) {
+    console.error('Spotify curate error:', err)
+    res.status(500).json({ error: err instanceof Error ? err.message : 'Curation failed' })
+  }
+})
+
+// SPA catch-all — serves index.html for any non-API GET (supports OAuth redirects with query params)
+app.get('*', (req, res) => {
+  if (process.env.AURORA_DIST_PATH) {
+    res.sendFile(join(process.env.AURORA_DIST_PATH, 'index.html'))
+  } else {
+    res.status(404).send('Not found')
+  }
+})
 
 app.listen(PORT, () => {
   console.log(`Aurora server running on http://localhost:${PORT}`)

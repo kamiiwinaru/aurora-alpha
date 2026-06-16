@@ -1,5 +1,19 @@
 # Changelog
 
+## [1.0.8] — 2026-06-16
+
+### Added
+- **Spotify integration** — music controls embedded in the sidebar: play/pause/skip, volume, liked track toggle, playlist add, and "now playing" display. Connects via Spotify OAuth (PKCE). Auto-ducks volume during intel alerts and restores after. AI can control playback via new Spotify tools.
+- **PVE panel (F11)** — Loyalty Point store offer ranker. Shows all LP offers across all logged-in characters sorted by ISK/LP, with required item costs, net ISK, and sell price pulled from market data.
+- **Intel "all clear" voice alerts** — Aurora now speaks a randomised clear phrase ("System clear", "All clear on intel") when a previously flagged system goes quiet.
+- **Notifications panel rework** — overhauled with a new `notif-utils` library: human-readable type labels instead of raw camelCase, color-coded categories (kills, structures, warfare, financial, etc.), read/unread dot indicators, inline text snippets, and mailing list support in compose. Notification count badge on landing page now reflects unread-only, not total.
+- **All panels always-mounted** — every tab panel is now kept in the DOM (hidden via CSS) rather than unmounted on tab switch. State is preserved when switching away and back.
+- **GitHub community files** — bug report template, feature request template, and a general "Other" issue template added to `.github/ISSUE_TEMPLATE/`. `CONTRIBUTING.md` and `SECURITY.md` added.
+
+### Changed
+- Notifications tab count in the landing page mail feed now shows unread notifications only, not total.
+- Panel layout in `App.tsx` refactored from conditional rendering to CSS-hidden always-mounted divs for consistency.
+
 ## [1.0.7] — 2026-06-15
 
 ### Added

@@ -3,17 +3,17 @@ import type {
   EveCharacter, EveSkill, EveSkillQueueItem, EveAsset, EveIndustryJob, EveMarketOrder,
   EveWalletTransaction, EveWalletJournalEntry, EveBlueprint, EveCharacterAttributes,
   EveImplant, EveJumpClone, EveShipLocation, EveStanding, EveContract,
-  EveMiningEntry, EveKillmail, EveLoyaltyPoint, EveNotification, EveMail, EveMailLabel,
+  EveMiningEntry, EveKillmail, EveLoyaltyPoint, EveNotification, EveMail, EveMailLabel, EveMailingList,
 } from '../types'
 import {
   getSkills, getSkillQueue, getAssets, getIndustryJobs, getMarketOrders,
   getTypeInfo, ACTIVITY_NAMES, resolveIds,
   getWalletBalance, getWalletJournal, getWalletTransactions,
   getBlueprints, getCharacterAttributes, getClones,
-  getLocation, getCurrentShip, getStandings, getContracts, getAllianceContracts, getCorporationContracts,
+  getLocation, getCurrentShip, getStandings, getContracts, getCorporationContracts,
   getMiningLedger, getKillmails, getKillmailDetail,
   getLoyaltyPoints, getNotifications, getFatigue, getPlanets,
-  getCalendarEvents, getPublicCharacterInfo, getMailHeaders, getMailLabels,
+  getCalendarEvents, getPublicCharacterInfo, getMailHeaders, getMailLabels, getMailingLists,
   getAssetNames,
 } from '../lib/eve-esi'
 
@@ -181,6 +181,7 @@ export function useEve() {
   // Mail
   const [mail, setMail] = useState<EveMail[]>([])
   const [mailLabels, setMailLabels] = useState<EveMailLabel[]>([])
+  const [mailingLists, setMailingLists] = useState<EveMailingList[]>([])
 
   // Map
   const [jumpBridges, setJumpBridges] = useState<Array<{ fromSystemId: number; destName: string }>>([])
@@ -204,7 +205,7 @@ export function useEve() {
     setBlueprints([]); setAttributes(null); setImplants([]); setJumpClones([])
     setShipLocation(null); setStandings([]); setLoyaltyPoints([]); setSecurityStatus(0)
     setContracts([]); setCorporationContracts([]); setMiningLedger([]); setKillmails([]); setNotifications([])
-    setPlanets([]); setCalendarEvents([]); setMail([]); setMailLabels([])
+    setPlanets([]); setCalendarEvents([]); setMail([]); setMailLabels([]); setMailingLists([])
   }, [])
 
   // Remove the active character (or a specific one by ID)
@@ -322,7 +323,7 @@ export function useEve() {
       getCurrentShip(id, token),
       getStandings(id, token),
       getContracts(id, token),
-      char.allianceId ? getAllianceContracts(char.allianceId, token) : Promise.reject('no alliance'),
+      Promise.reject('no alliance endpoint'),
       char.corporationId ? getCorporationContracts(char.corporationId, token) : Promise.reject('no corporation'),
       getMiningLedger(id, token),
       getKillmails(id, token),
@@ -774,13 +775,14 @@ export function useEve() {
       // ── Notifications ─────────────────────────────────────────────────────
       if (isActive && notifRes.status === 'fulfilled') {
         setNotifications(notifRes.value
-          .filter(n => !n.is_read)
-          .slice(0, 20)
+          .slice(0, 500)
           .map(n => ({
             notificationId: n.notification_id,
             type: n.type,
+            senderId: n.sender_id,
             timestamp: n.timestamp,
-            text: (n.text ?? '').slice(0, 300),
+            isRead: n.is_read ?? false,
+            text: n.text ?? '',
           })))
       }
 
@@ -812,7 +814,7 @@ export function useEve() {
 
       // ── Mail ──────────────────────────────────────────────────────────────
       if (isActive && mailRes.status === 'fulfilled') {
-        const headers = mailRes.value.slice(0, 50)
+        const headers = mailRes.value
         const senderIds = [...new Set(headers.map(m => m.from))]
         const names = await resolveIds(senderIds)
         const resolvedMail = headers.map(m => ({
@@ -823,6 +825,10 @@ export function useEve() {
           timestamp: m.timestamp,
           isRead: m.is_read ?? false,
           labelIds: m.labels ?? [],
+          recipients: (m.recipients ?? []).map(r => ({
+            recipientId: r.recipient_id,
+            recipientType: r.recipient_type as EveMail['recipients'][number]['recipientType'],
+          })),
         }))
         setMail(resolvedMail)
         fetch('/api/mail/sync', {
@@ -836,8 +842,16 @@ export function useEve() {
         setMailLabels((mailLabelsRes.value.labels ?? []).map(l => ({
           labelId: l.label_id,
           name: l.name,
+          color: l.color,
           unreadCount: l.unread_count ?? 0,
         })))
+      }
+
+      // ── Mailing lists ─────────────────────────────────────────────────────
+      if (isActive) {
+        getMailingLists(char.characterId, char.accessToken).then(lists => {
+          setMailingLists(lists.map(l => ({ mailingListId: l.mailing_list_id, name: l.name })))
+        }).catch(() => { /* ignore — scope may not be granted */ })
       }
 
       // ── Public info (security status) ─────────────────────────────────────
@@ -979,37 +993,35 @@ export function useEve() {
     let token = char.accessToken
     const id = char.characterId
 
-    // Quick auth check — try to refresh the token if expired before deciding the character is dead
-    try {
-      const probe = await fetch(`https://esi.evetech.net/latest/characters/${id}/wallet/`, {
-        headers: { Authorization: `Bearer ${token}` },
-      })
-      if (probe.status === 401) {
-        // Access token expired — try to get a new one via the refresh token
-        try {
-          const refreshRes = await fetch('/api/eve/refresh', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ refresh_token: char.refreshToken }),
-          })
-          const refreshData = await refreshRes.json()
-          if (refreshData.access_token) {
-            // Update the stored token so future calls use it
-            const updatedChar = { ...char, accessToken: refreshData.access_token, expiresAt: Date.now() + (refreshData.expires_in ?? 1199) * 1000 }
-            setCharacters(prev => prev.map(c => c.characterId === id ? updatedChar : c))
-            // Continue the light refresh with the new token
-            token = refreshData.access_token
-          } else {
-            // Refresh token also invalid — character session is revoked, drop it
-            setCharacters(prev => prev.filter(c => c.characterId !== id))
+    // Quick auth check — only probe if token is near expiry (< 60s remaining)
+    if (!char.expiresAt || char.expiresAt - Date.now() < 60_000) {
+      try {
+        const probe = await fetch(`https://esi.evetech.net/latest/characters/${id}/wallet/`, {
+          headers: { Authorization: `Bearer ${token}` },
+        })
+        if (probe.status === 401) {
+          // Access token expired — try to get a new one via the refresh token
+          try {
+            const refreshRes = await fetch('/api/eve/refresh', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ refresh_token: char.refreshToken }),
+            })
+            const refreshData = await refreshRes.json()
+            if (refreshData.access_token) {
+              const updatedChar = { ...char, accessToken: refreshData.access_token, expiresAt: Date.now() + (refreshData.expires_in ?? 1199) * 1000 }
+              setCharacters(prev => prev.map(c => c.characterId === id ? updatedChar : c))
+              token = refreshData.access_token
+            } else {
+              setCharacters(prev => prev.filter(c => c.characterId !== id))
+              return
+            }
+          } catch {
             return
           }
-        } catch {
-          // Network error during refresh — skip rather than dropping the character
-          return
         }
-      }
-    } catch { /* network error on probe — skip silently */ }
+      } catch { /* network error on probe — skip silently */ }
+    }
 
     const [balanceRes, journalRes, txRes, assetsRes, jobsRes, ordersRes] = await Promise.allSettled([
       getWalletBalance(id, token),
@@ -1159,7 +1171,7 @@ export function useEve() {
     blueprints, attributes, implants, jumpClones, shipLocation,
     standings, loyaltyPoints, securityStatus, jumpFatigue,
     contracts, corporationContracts, miningLedger, killmails, notifications,
-    planets, calendarEvents, mail, mailLabels, jumpBridges,
+    planets, calendarEvents, mail, mailLabels, mailingLists, jumpBridges,
     loading, error,
     loginWithToken, logout, switchCharacter, refreshData, refreshAllCharacters,
   }

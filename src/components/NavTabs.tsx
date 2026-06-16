@@ -1,4 +1,4 @@
-import { MessageSquare, Zap, Factory, Package, TrendingUp, Calculator, Skull, Radio, Bell, Map } from 'lucide-react'
+import { MessageSquare, Zap, Factory, Package, TrendingUp, Calculator, Skull, Radio, Bell, Map, Shield } from 'lucide-react'
 import type { ActivePanel } from '../types'
 
 interface NavTabsProps {
@@ -17,6 +17,7 @@ const TABS: { id: ActivePanel; label: string; icon: React.ReactNode; shortcut: s
   { id: 'zkill',         label: 'ZKILL',   icon: <Skull size={12} />,         shortcut: 'F8' },
   { id: 'intel',         label: 'INTEL',   icon: <Radio size={12} />,         shortcut: 'F9' },
   { id: 'map',           label: 'MAP',     icon: <Map size={12} />,           shortcut: 'F10' },
+  { id: 'pve',           label: 'PVE',     icon: <Shield size={12} />,        shortcut: 'F11' },
 ]
 
 export default function NavTabs({ active, onChange }: NavTabsProps) {

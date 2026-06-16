@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from 'react'
 import { motion } from 'framer-motion'
-import { RefreshCw, Copy, Check, Loader2, Save, Trash2, ChevronDown } from 'lucide-react'
+import { RefreshCw, Copy, Check, Loader2, Save, Trash2, ChevronDown, Share2, X } from 'lucide-react'
 import type { EveSkill, EveSkillQueueItem } from '../../types'
 import { timeUntil } from '../../lib/eve-esi'
 
@@ -199,6 +199,106 @@ function FitAnalyzer({ skills, characterId }: { skills: EveSkill[]; characterId?
     }
   }
 
+  const [sharingId, setSharingId] = useState<string | null>(null)
+  const [shareLink, setShareLink] = useState<{ fitId: string; url: string } | null>(null)
+  const [importToken, setImportToken] = useState('')
+  const [importing, setImporting] = useState(false)
+  const [importMsg, setImportMsg] = useState<{ text: string; ok: boolean } | null>(null)
+
+  async function shareFit(fit: SavedFit, e: React.MouseEvent) {
+    e.stopPropagation()
+    setSharingId(fit.id)
+    setShareLink(null)
+    try {
+      const r = await fetch('/api/fits/share', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ids: [fit.id] }),
+      })
+      const d = await r.json()
+      if (!r.ok) throw new Error(d.error ?? 'Share failed')
+      setShareLink({ fitId: fit.id, url: d.url })
+      writeClipboard(d.url)
+      setDropdownOpen(false)
+    } catch (err) {
+      setImportMsg({ text: err instanceof Error ? err.message : 'Share failed', ok: false })
+      setTimeout(() => setImportMsg(null), 4000)
+    } finally {
+      setSharingId(null)
+    }
+  }
+
+  async function importShare() {
+    if (!importToken.trim()) return
+    setImporting(true)
+    setImportMsg(null)
+    try {
+      const r = await fetch('/api/fits/import-share', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ token: importToken.trim() }),
+      })
+      const d = await r.json()
+      if (!r.ok) throw new Error(d.error ?? 'Import failed')
+      if (d.added === 0) {
+        setImportMsg({ text: 'Already have all fits in this link', ok: true })
+      } else {
+        setImportMsg({ text: `Imported ${d.added} fit${d.added !== 1 ? 's' : ''}`, ok: true })
+        setSavedFits(await fetch('/api/fits').then(r => r.json()))
+      }
+      setImportToken('')
+    } catch (err) {
+      setImportMsg({ text: err instanceof Error ? err.message : 'Import failed', ok: false })
+    } finally {
+      setImporting(false)
+      setTimeout(() => setImportMsg(null), 5000)
+    }
+  }
+
+  async function shareCurrent() {
+    if (!fitText.trim()) return
+    setSharingId('__current__')
+    setShareLink(null)
+    try {
+      const r = await fetch('/api/fits/share', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ fitTexts: [fitText.trim()] }),
+      })
+      const d = await r.json()
+      if (!r.ok) throw new Error(d.error ?? 'Share failed')
+      setShareLink({ fitId: '__current__', url: d.url })
+      writeClipboard(d.url)
+    } catch (err) {
+      setImportMsg({ text: err instanceof Error ? err.message : 'Share failed', ok: false })
+      setTimeout(() => setImportMsg(null), 4000)
+    } finally {
+      setSharingId(null)
+    }
+  }
+
+  async function shareAll() {
+    if (!savedFits.length) return
+    setSharingId('__all__')
+    setShareLink(null)
+    try {
+      const r = await fetch('/api/fits/share', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ids: savedFits.map(f => f.id) }),
+      })
+      const d = await r.json()
+      if (!r.ok) throw new Error(d.error ?? 'Share failed')
+      setShareLink({ fitId: '__all__', url: d.url })
+      writeClipboard(d.url)
+    } catch (err) {
+      setImportMsg({ text: err instanceof Error ? err.message : 'Share failed', ok: false })
+      setTimeout(() => setImportMsg(null), 4000)
+    } finally {
+      setSharingId(null)
+    }
+  }
+
   async function analyze() {
     if (!fitText.trim()) return
     await runAnalysis(fitText)
@@ -268,13 +368,22 @@ function FitAnalyzer({ skills, characterId }: { skills: EveSkill[]; characterId?
                   <div className="text-eve-text text-xs truncate">{fit.name}</div>
                   <div className="text-eve-dim text-[10px] truncate">{fit.shipType}</div>
                 </div>
-                <button
-                  className="text-eve-dim hover:text-eve-red opacity-0 group-hover:opacity-100 transition-opacity ml-2 flex-shrink-0"
-                  onMouseDown={e => deleteFit(fit.id, e)}
-                  title="Delete fit"
-                >
-                  <Trash2 size={10} />
-                </button>
+                <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity ml-2 shrink-0">
+                  <button
+                    className="text-eve-dim hover:text-eve-cyan"
+                    onMouseDown={e => shareFit(fit, e)}
+                    title="Share fit — copies link to clipboard"
+                  >
+                    {sharingId === fit.id ? <Loader2 size={10} className="animate-spin" /> : <Share2 size={10} />}
+                  </button>
+                  <button
+                    className="text-eve-dim hover:text-eve-red"
+                    onMouseDown={e => deleteFit(fit.id, e)}
+                    title="Delete fit"
+                  >
+                    <Trash2 size={10} />
+                  </button>
+                </div>
               </div>
             ))}
           </div>
@@ -307,6 +416,17 @@ function FitAnalyzer({ skills, characterId }: { skills: EveSkill[]; characterId?
         >
           CLEAR
         </button>
+        {fitText.trim() && (
+          <button
+            className="eve-btn text-xs py-1.5 flex items-center justify-center gap-1.5 px-3 flex-shrink-0"
+            onClick={shareCurrent}
+            disabled={sharingId === '__current__'}
+            title="Share current fit — copies link to clipboard"
+          >
+            {sharingId === '__current__' ? <Loader2 size={11} className="animate-spin" /> : <Share2 size={11} />}
+            SHARE
+          </button>
+        )}
         {selectedFitId && (
           <button
             className="eve-btn text-xs py-1.5 flex items-center justify-center gap-1.5 px-3 flex-shrink-0 text-eve-red hover:border-eve-red"
@@ -326,6 +446,52 @@ function FitAnalyzer({ skills, characterId }: { skills: EveSkill[]; characterId?
           {loading ? 'ANALYZING…' : 'ANALYZE FIT'}
         </button>
       </div>
+
+      {/* Share all fits */}
+      <button
+        className="eve-btn text-[10px] py-1 px-2 flex items-center gap-1.5 w-full justify-center"
+        onClick={shareAll}
+        disabled={sharingId === '__all__' || savedFits.length === 0}
+        title="Generate a share link for all saved fits"
+      >
+        {sharingId === '__all__' ? <Loader2 size={10} className="animate-spin" /> : <Share2 size={10} />}
+        SHARE ALL FITS
+      </button>
+
+      {/* Share link display */}
+      {shareLink && (
+        <div className="flex items-center gap-2 border border-eve-cyan/30 bg-eve-cyan/5 px-2 py-1.5">
+          <span className="text-[10px] text-eve-cyan shrink-0">LINK COPIED</span>
+          <span className="flex-1 text-[10px] text-eve-muted font-mono truncate">{shareLink.url}</span>
+          <button
+            className="text-eve-dim hover:text-eve-cyan shrink-0"
+            onClick={() => { writeClipboard(shareLink.url); }}
+            title="Copy again"
+          ><Copy size={10} /></button>
+          <button className="text-eve-dim hover:text-eve-muted shrink-0" onClick={() => setShareLink(null)}><X size={10} /></button>
+        </div>
+      )}
+
+      {/* Import from share link */}
+      <div className="flex gap-2 items-center">
+        <input
+          className="eve-input flex-1 text-[11px] py-1"
+          placeholder="Paste share link or token to import…"
+          value={importToken}
+          onChange={e => setImportToken(e.target.value)}
+          onKeyDown={e => e.key === 'Enter' && importShare()}
+        />
+        <button
+          className="eve-btn text-[10px] py-1 px-2 shrink-0"
+          onClick={importShare}
+          disabled={importing || !importToken.trim()}
+        >
+          {importing ? <Loader2 size={10} className="animate-spin" /> : '↓'} IMPORT
+        </button>
+      </div>
+      {importMsg && (
+        <div className={`text-[10px] ${importMsg.ok ? 'text-eve-green' : 'text-eve-red'}`}>{importMsg.text}</div>
+      )}
 
       {error && <div className="text-eve-red text-xs">{error}</div>}
 
@@ -409,13 +575,21 @@ export default function SkillPanel({ skills, skillQueue, loading, onRefresh, cha
 
   useEffect(() => {
     if (!characterId) { setEnrichedSkills(skills); return }
-    fetch(`/api/skills/${characterId}`)
-      .then(r => r.ok ? r.json() : null)
-      .then(data => {
-        if (data?.skills?.length) setEnrichedSkills(data.skills)
-        else setEnrichedSkills(skills)
-      })
-      .catch(() => setEnrichedSkills(skills))
+    let cancelled = false
+    const doFetch = () =>
+      fetch(`/api/skills/${characterId}`)
+        .then(r => r.ok ? r.json() : null)
+        .then(data => {
+          if (cancelled) return
+          if (data?.skills?.length) setEnrichedSkills(data.skills)
+          else setEnrichedSkills(skills)
+        })
+        .catch(() => { if (!cancelled) setEnrichedSkills(skills) })
+
+    doFetch()
+    // Re-fetch after 8s to pick up async group resolution that may still be running
+    const retry = setTimeout(doFetch, 8000)
+    return () => { cancelled = true; clearTimeout(retry) }
   }, [characterId, skills])
 
   const grouped = new Map<string, EnrichedSkill[]>()

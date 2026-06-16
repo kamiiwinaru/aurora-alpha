@@ -58,6 +58,7 @@ function ensureFixedKeys() {
     existing['EVE_CLIENT_ID']     !== EVE_CLIENT_ID ||
     existing['EVE_CLIENT_SECRET'] !== EVE_CLIENT_SECRET ||
     existing['JANICE_API_KEY']    !== 'G9KwKq3465588VPd6747t95Zh94q3W2E' ||
+    existing['AURORA_FITS_WORKER_URL'] !== 'https://aurora-fits.aurora-eve.workers.dev' ||
     (DISCORD_WEBHOOK_URL && existing['DISCORD_WEBHOOK_URL'] !== DISCORD_WEBHOOK_URL) ||
     !existing['EVE_CALLBACK_URL']
   if (needsWrite) {
@@ -101,6 +102,7 @@ function writeEnvValues(values: Record<string, string>) {
   merged['VITE_EVE_CALLBACK_URL'] = 'http://localhost:3001/api/eve/callback'
   merged['PORT']                  = '3001'
   merged['JANICE_API_KEY']        = 'G9KwKq3465588VPd6747t95Zh94q3W2E'
+  merged['AURORA_FITS_WORKER_URL'] = 'https://aurora-fits.aurora-eve.workers.dev'
   if (DISCORD_WEBHOOK_URL) merged['DISCORD_WEBHOOK_URL'] = DISCORD_WEBHOOK_URL
 
   const content = Object.entries(merged)

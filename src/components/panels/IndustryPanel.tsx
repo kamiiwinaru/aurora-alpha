@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { RefreshCw, Factory, Truck, AlertTriangle, ArrowRight, FlaskConical, CheckCircle2, XCircle, Search, X, ShoppingCart, Zap, Wrench, ChevronDown, ChevronRight as ChevronRightIcon, Copy, Check, Download } from 'lucide-react'
+import { RefreshCw, Factory, Truck, AlertTriangle, ArrowRight, FlaskConical, CheckCircle2, XCircle, Search, X, ShoppingCart, Zap, Wrench, ChevronDown, ChevronRight as ChevronRightIcon, Copy, Check, Download, TrendingUp, TrendingDown, Minus, Upload } from 'lucide-react'
 import type { EveIndustryJob, EveSkill, EveAsset, EveCharacter } from '../../types'
 import { timeUntil, formatISK } from '../../lib/eve-esi'
 
@@ -322,10 +322,10 @@ function formatTime(seconds: number): string {
 
 // ── Structure / rig metadata (mirrors server lookup tables) ─────────────────
 const STRUCTURES = [
-  { key: 'station', label: 'NPC Station',  me: 0, te: 0  },
-  { key: 'raitaru', label: 'Raitaru',       me: 1, te: 15 },
-  { key: 'azbel',   label: 'Azbel',         me: 1, te: 20 },
-  { key: 'sotiyo',  label: 'Sotiyo',        me: 1, te: 30 },
+  { key: 'station', label: 'NPC Station',  me: 0, te: 0,  costReduction: 0 },
+  { key: 'raitaru', label: 'Raitaru',       me: 1, te: 15, costReduction: 3 },
+  { key: 'azbel',   label: 'Azbel',         me: 1, te: 20, costReduction: 3 },
+  { key: 'sotiyo',  label: 'Sotiyo',        me: 1, te: 30, costReduction: 3 },
 ] as const
 type StructureKey = typeof STRUCTURES[number]['key']
 
@@ -709,6 +709,169 @@ function BlueprintCalculator({
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
+  // Fit import modal
+  const [showFitImport, setShowFitImport] = useState(false)
+  const [fitImportText, setFitImportText] = useState('')
+  const [fitImportLoading, setFitImportLoading] = useState(false)
+  const [fitImportError, setFitImportError] = useState<string | null>(null)
+  const [fitImportResults, setFitImportResults] = useState<Array<{
+    name: string; qty: number; itemTypeId: number | null
+    blueprintTypeId: number | null; blueprintName: string | null; hasBlueprint: boolean
+  }> | null>(null)
+  const [savedFits, setSavedFits] = useState<Array<{ id: string; name: string; fitText: string }>>([])
+
+  // Fit Build Plan mode
+  interface FitPlanItem {
+    blueprint: BlueprintImport
+    data: BlueprintData | null
+    loading: boolean
+    expanded: boolean
+    me: number
+    te: number
+    structure: StructureKey
+    rig: RigKey
+    security: SecurityKey
+  }
+  const [fitPlanItems, setFitPlanItems] = useState<FitPlanItem[]>([])
+  const [fitPlanMissing, setFitPlanMissing] = useState<Array<{ name: string; qty: number }>>([])
+  const [fitPlanMode, setFitPlanMode] = useState(false)
+  const [fitPlanLoading, setFitPlanLoading] = useState(false)
+  const [fitPlanQty, setFitPlanQty] = useState(1)
+
+  const refetchItem = useCallback(async (i: number, item: FitPlanItem) => {
+    setFitPlanItems(prev => prev.map((p, j) => j === i ? { ...p, loading: true } : p))
+    try {
+      const industryLevel = skills.find(s => s.skillId === 3380)?.trainedLevel ?? 0
+      const advIndLevel   = skills.find(s => s.skillId === 3388)?.trainedLevel ?? 0
+      const params = new URLSearchParams({
+        typeId: String(item.blueprint.typeId),
+        me: String(item.me), te: String(item.te), runs: String(item.blueprint.runs),
+        structure: item.structure, rig: item.rig, security: item.security,
+        industryLevel: String(industryLevel), advIndLevel: String(advIndLevel),
+        ...(characterId ? { characterId: String(characterId) } : {}),
+      })
+      const res = await fetch(`/api/industry/blueprint?${params}`)
+      const json = res.ok ? await res.json() as BlueprintData : null
+      setFitPlanItems(prev => prev.map((p, j) => j === i ? { ...p, data: json, loading: false } : p))
+    } catch {
+      setFitPlanItems(prev => prev.map((p, j) => j === i ? { ...p, loading: false } : p))
+    }
+  }, [skills, characterId])
+
+  useEffect(() => {
+    if (showFitImport) {
+      fetch('/api/fits').then(r => r.json()).then(setSavedFits).catch(() => {})
+    }
+  }, [showFitImport])
+
+  async function resolveFit() {
+    if (!fitImportText.trim()) return
+    setFitImportLoading(true)
+    setFitImportError(null)
+    setFitImportResults(null)
+    try {
+      const r = await fetch('/api/industry/fit-blueprints', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ fitText: fitImportText }),
+      })
+      const data = await r.json()
+      if (!r.ok) throw new Error(data.error ?? 'Failed to resolve fit')
+      setFitImportResults(data.items)
+    } catch (e) {
+      setFitImportError(e instanceof Error ? e.message : 'Unknown error')
+    } finally {
+      setFitImportLoading(false)
+    }
+  }
+
+  async function loadFitPlan() {
+    if (!fitImportResults) return
+    const buildable = fitImportResults.filter(r => r.hasBlueprint && r.blueprintTypeId && r.blueprintName)
+    const missing   = fitImportResults.filter(r => !r.hasBlueprint)
+    const initialItems: FitPlanItem[] = buildable.map(r => ({
+      blueprint: { typeId: r.blueprintTypeId!, typeName: r.blueprintName!, me: 0, te: 0, runs: r.qty },
+      data: null, loading: true, expanded: false,
+      me: 0, te: 0, structure, rig, security,
+    }))
+    setFitPlanItems(initialItems)
+    setFitPlanMissing(missing.map(r => ({ name: r.name, qty: r.qty })))
+    setFitPlanMode(true)
+    setFitPlanLoading(true)
+    setFitPlanQty(1)
+    setShowFitImport(false)
+
+    const industryLevel = skills.find(s => s.skillId === 3380)?.trainedLevel ?? 0
+    const advIndLevel   = skills.find(s => s.skillId === 3388)?.trainedLevel ?? 0
+
+    const fetched = await Promise.all(buildable.map(async (r, i) => {
+      try {
+        const params = new URLSearchParams({
+          typeId: String(r.blueprintTypeId!),
+          me: '0', te: '0', runs: String(r.qty),
+          structure, rig, security,
+          industryLevel: String(industryLevel),
+          advIndLevel: String(advIndLevel),
+          ...(characterId ? { characterId: String(characterId) } : {}),
+        })
+        const res = await fetch(`/api/industry/blueprint?${params}`)
+        const json = await res.json()
+        return { i, data: res.ok ? json as BlueprintData : null }
+      } catch { return { i, data: null } }
+    }))
+
+    setFitPlanItems(prev => {
+      const next = [...prev]
+      for (const { i, data } of fetched) next[i] = { ...next[i], data, loading: false }
+      return next
+    })
+    setFitPlanLoading(false)
+  }
+
+  // Profitability
+  const PROFIT_PREFS_KEY = 'aurora_bp_profit_prefs'
+  const loadProfitPrefs = () => {
+    try { return JSON.parse(localStorage.getItem(PROFIT_PREFS_KEY) ?? '{}') } catch { return {} }
+  }
+  const [profitSCI, setProfitSCI]             = useState<string>(() => loadProfitPrefs().sci ?? '4')
+  const [profitFacilityTax, setProfitFacilityTax] = useState<string>(() => loadProfitPrefs().facilityTax ?? '1')
+  const [jitaPrices, setJitaPrices]           = useState<Record<number, { bestSell: number | null; bestBuy: number | null; adjustedPrice: number | null }>>({})
+  const [jitaLoading, setJitaLoading]         = useState(false)
+  const [jitaError, setJitaError]             = useState<string | null>(null)
+  const [profitOpen, setProfitOpen]           = useState(false)
+
+  const saveProfitPrefs = (sci: string, ft: string) =>
+    localStorage.setItem(PROFIT_PREFS_KEY, JSON.stringify({ sci, facilityTax: ft }))
+
+  const fetchJitaPrices = useCallback(async () => {
+    if (!data) return
+    const typeIds = [
+      ...(data.productTypeId ? [data.productTypeId] : []),
+      ...data.materials.map(m => m.typeId),
+    ]
+    if (typeIds.length === 0) return
+    setJitaLoading(true); setJitaError(null)
+    try {
+      const res = await fetch('/api/industry/jita-prices', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ typeIds }),
+      })
+      const json = await res.json() as { prices: { typeId: number; bestSell: number | null; bestBuy: number | null; adjustedPrice: number | null }[] }
+      const map: Record<number, { bestSell: number | null; bestBuy: number | null; adjustedPrice: number | null }> = {}
+      for (const p of json.prices) map[p.typeId] = { bestSell: p.bestSell, bestBuy: p.bestBuy, adjustedPrice: p.adjustedPrice }
+      setJitaPrices(map)
+    } catch (err) {
+      setJitaError(err instanceof Error ? err.message : 'Price fetch failed')
+    } finally { setJitaLoading(false) }
+  }, [data])  // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Auto-fetch Jita prices whenever blueprint data loads
+  useEffect(() => {
+    if (data) fetchJitaPrices()
+    else setJitaPrices({})
+  }, [data])  // eslint-disable-line react-hooks/exhaustive-deps
+
   // Search
   const [searchQuery, setSearchQuery] = useState('')
   const [searchResults, setSearchResults] = useState<SearchResult[]>([])
@@ -879,7 +1042,8 @@ function BlueprintCalculator({
     <div className="flex flex-col gap-3">
 
       {/* ── Search bar ─────────────────────────────────────────────── */}
-      <div className="relative">
+      <div className="flex gap-2">
+      <div className="relative flex-1">
         <div className="flex items-center border border-eve-border bg-black/20 px-2 gap-2">
           <Search size={11} className="text-eve-muted shrink-0" />
           <input
@@ -912,6 +1076,15 @@ function BlueprintCalculator({
             No blueprints found for "{searchQuery}"
           </div>
         )}
+      </div>
+      <button
+        onClick={() => { setShowFitImport(true); setFitImportResults(null); setFitImportError(null) }}
+        className="flex items-center gap-1 px-2 border border-eve-border bg-black/20 text-eve-muted hover:text-eve-cyan hover:border-eve-cyan/40 transition-colors shrink-0"
+        title="Import fit from Fit Analyzer"
+      >
+        <Upload size={11} />
+        <span className="text-[10px] uppercase tracking-wider">Fit</span>
+      </button>
       </div>
 
       {/* ── Toggles row ─────────────────────────────────────────────── */}
@@ -951,7 +1124,208 @@ function BlueprintCalculator({
         </label>
       </div>
 
-      {!activeBlueprint ? (
+      {fitPlanMode ? (() => {
+        const aggMap = new Map<number, { name: string; qty: number; have: number }>()
+        for (const item of fitPlanItems) {
+          if (!item.data) continue
+          for (const mat of item.data.materials) {
+            const have = clientAssetMap.get(mat.typeId) ?? 0
+            const qty = mat.adjQty * fitPlanQty
+            const ex = aggMap.get(mat.typeId)
+            if (ex) { ex.qty += qty; ex.have = have }
+            else aggMap.set(mat.typeId, { name: mat.name, qty, have })
+          }
+        }
+        const aggMats = [...aggMap.entries()]
+          .map(([typeId, v]) => ({ typeId, ...v, need: Math.max(0, v.qty - v.have) }))
+          .sort((a, b) => b.qty - a.qty)
+        const missingCount = aggMats.filter(m => m.need > 0).length
+
+        return (
+          <div className="flex flex-col gap-2">
+            {/* Header */}
+            <div className="flex items-center justify-between gap-3">
+              <span className="text-[10px] uppercase tracking-widest text-eve-cyan shrink-0">
+                Fit Build Plan — {fitPlanItems.length} blueprints
+                {fitPlanLoading && <span className="text-eve-dim ml-2 animate-pulse">loading…</span>}
+              </span>
+              <div className="flex items-center gap-2">
+                <span className="text-[10px] text-eve-muted uppercase tracking-wider shrink-0">Fits</span>
+                <input
+                  type="number"
+                  min={1}
+                  max={999}
+                  value={fitPlanQty}
+                  onChange={e => setFitPlanQty(Math.max(1, Math.min(999, Number(e.target.value) || 1)))}
+                  className="eve-input w-14 text-center text-[11px] py-0.5 px-1"
+                />
+              </div>
+              <button onClick={() => setFitPlanMode(false)} className="text-[10px] text-eve-muted hover:text-eve-text uppercase tracking-wider shrink-0">← Back</button>
+            </div>
+
+            {/* Side-by-side */}
+            <div className="grid grid-cols-2 gap-3 items-start">
+
+              {/* Left: Blueprint list + missing */}
+              <div className="flex flex-col gap-2">
+              <div className="eve-panel divide-y divide-eve-border/30">
+                {fitPlanItems.map((item, i) => {
+                  const structInfoI = STRUCTURES.find(s => s.key === item.structure)!
+                  const rigInfoI    = RIG_BONUSES[item.rig][item.security]
+                  return (
+                    <div key={i} className="flex flex-col">
+                      <button
+                        className="flex items-center gap-2 px-3 py-2 text-left hover:bg-eve-cyan/5 transition-colors w-full"
+                        onClick={() => setFitPlanItems(prev => prev.map((p, j) => j === i ? { ...p, expanded: !p.expanded } : p))}
+                      >
+                        <span className="text-eve-dim text-[9px]">{item.expanded ? '▾' : '▸'}</span>
+                        <span className="flex-1 text-[11px] text-eve-text truncate">{item.data?.productName ?? item.blueprint.typeName.replace(' Blueprint', '')}</span>
+                        <span className="text-[10px] text-eve-dim shrink-0">×{item.blueprint.runs * fitPlanQty}</span>
+                        {item.loading && <span className="w-1.5 h-1.5 rounded-full bg-eve-cyan animate-pulse shrink-0" />}
+                        <button
+                          className="shrink-0 text-[9px] uppercase tracking-wider text-eve-cyan border border-eve-cyan/40 px-1.5 py-0.5 hover:bg-eve-cyan/10 transition-colors"
+                          onClick={e => { e.stopPropagation(); setActiveBlueprint({ ...item.blueprint, me: item.me, te: item.te }); setMe(item.me); setTe(item.te); setRuns(item.blueprint.runs); setStructure(item.structure); setRig(item.rig); setSecurity(item.security); setFitPlanMode(false) }}
+                        >Open</button>
+                      </button>
+
+                      {item.expanded && (
+                        <div className="px-3 pb-3 pt-2 border-t border-eve-border/20 flex flex-col gap-2">
+                          {/* ME / TE sliders */}
+                          <div className="grid grid-cols-2 gap-2">
+                            <div>
+                              <div className="eve-label text-[9px] mb-1">ME ({item.me})</div>
+                              <input type="range" min={0} max={10} value={item.me}
+                                onChange={e => setFitPlanItems(prev => prev.map((p, j) => j === i ? { ...p, me: Number(e.target.value) } : p))}
+                                onMouseUp={e => setFitPlanItems(prev => { const next = prev.map((p, j) => j === i ? { ...p, me: Number((e.target as HTMLInputElement).value) } : p); refetchItem(i, next[i]); return next })}
+                                onTouchEnd={e => setFitPlanItems(prev => { const next = prev.map((p, j) => j === i ? { ...p, me: Number((e.target as HTMLInputElement).value) } : p); refetchItem(i, next[i]); return next })}
+                                className="w-full accent-cyan-400 cursor-pointer"
+                              />
+                            </div>
+                            <div>
+                              <div className="eve-label text-[9px] mb-1">TE ({item.te})</div>
+                              <input type="range" min={0} max={20} value={item.te}
+                                onChange={e => setFitPlanItems(prev => prev.map((p, j) => j === i ? { ...p, te: Number(e.target.value) } : p))}
+                                onMouseUp={e => setFitPlanItems(prev => { const next = prev.map((p, j) => j === i ? { ...p, te: Number((e.target as HTMLInputElement).value) } : p); refetchItem(i, next[i]); return next })}
+                                onTouchEnd={e => setFitPlanItems(prev => { const next = prev.map((p, j) => j === i ? { ...p, te: Number((e.target as HTMLInputElement).value) } : p); refetchItem(i, next[i]); return next })}
+                                className="w-full accent-cyan-400 cursor-pointer"
+                              />
+                            </div>
+                          </div>
+
+                          {/* Structure / Rig / Security */}
+                          <div className="grid grid-cols-3 gap-1.5">
+                            <div>
+                              <div className="eve-label text-[9px] mb-1">
+                                STRUCTURE{structInfoI.me > 0 && <span className="text-eve-green ml-1">−{structInfoI.me}%</span>}
+                              </div>
+                              <select value={item.structure} className="eve-input w-full py-0.5 text-[9px] cursor-pointer"
+                                onChange={e => {
+                                  const v = e.target.value as StructureKey
+                                  const updated = { ...item, structure: v }
+                                  setFitPlanItems(prev => prev.map((p, j) => j === i ? { ...p, structure: v } : p))
+                                  refetchItem(i, updated)
+                                }}>
+                                {STRUCTURES.map(s => <option key={s.key} value={s.key}>{s.label}</option>)}
+                              </select>
+                            </div>
+                            <div>
+                              <div className="eve-label text-[9px] mb-1">
+                                RIG{rigInfoI.me > 0 && <span className="text-eve-green ml-1">−{rigInfoI.me}%</span>}
+                              </div>
+                              <select value={item.rig} className="eve-input w-full py-0.5 text-[9px] cursor-pointer"
+                                onChange={e => {
+                                  const v = e.target.value as RigKey
+                                  const updated = { ...item, rig: v }
+                                  setFitPlanItems(prev => prev.map((p, j) => j === i ? { ...p, rig: v } : p))
+                                  refetchItem(i, updated)
+                                }}>
+                                {RIGS.map(r => <option key={r.key} value={r.key}>{r.label}</option>)}
+                              </select>
+                            </div>
+                            <div>
+                              <div className="eve-label text-[9px] mb-1">SEC</div>
+                              <select value={item.security} className={`eve-input w-full py-0.5 text-[9px] cursor-pointer ${item.rig === 'none' ? 'opacity-40' : ''}`}
+                                onChange={e => {
+                                  const v = e.target.value as SecurityKey
+                                  const updated = { ...item, security: v }
+                                  setFitPlanItems(prev => prev.map((p, j) => j === i ? { ...p, security: v } : p))
+                                  refetchItem(i, updated)
+                                }}>
+                                {SECURITIES.map(s => <option key={s.key} value={s.key}>{s.label}</option>)}
+                              </select>
+                            </div>
+                          </div>
+
+                          {/* Materials for this item */}
+                          {item.data && (
+                            <div className="flex flex-col gap-0.5 mt-1">
+                              {item.data.materials.map(mat => {
+                                const have = clientAssetMap.get(mat.typeId) ?? 0
+                                const need = Math.max(0, mat.adjQty - have)
+                                return (
+                                  <div key={mat.typeId} className="flex items-center gap-1.5">
+                                    <span className={`text-[9px] shrink-0 ${need > 0 ? 'text-eve-red' : 'text-eve-green'}`}>{need > 0 ? '✗' : '✓'}</span>
+                                    <span className="flex-1 text-[10px] text-eve-text truncate">{mat.name}</span>
+                                    <span className="text-[10px] text-eve-muted shrink-0">×{mat.adjQty.toLocaleString()}</span>
+                                  </div>
+                                )
+                              })}
+                              <div className="text-[10px] text-eve-dim mt-1">
+                                Time: {item.data.adjustedTime >= 3600 ? `${(item.data.adjustedTime / 3600).toFixed(1)}h` : `${Math.ceil(item.data.adjustedTime / 60)}m`}
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  )
+                })}
+              </div>
+
+              {/* Missing blueprints */}
+              {fitPlanMissing.length > 0 && (
+                <div className="flex flex-col gap-1 mt-1">
+                  <div className="text-[10px] uppercase tracking-wider text-eve-red/80 px-1">
+                    No Blueprint — {fitPlanMissing.length} items
+                  </div>
+                  <div className="eve-panel divide-y divide-eve-border/20 opacity-60">
+                    {fitPlanMissing.map((m, i) => (
+                      <div key={i} className="flex items-center gap-2 px-3 py-1.5">
+                        <XCircle size={10} className="text-eve-red shrink-0" />
+                        <span className="flex-1 text-[11px] text-eve-muted truncate">{m.name}</span>
+                        <span className="text-[10px] text-eve-dim shrink-0">×{m.qty}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+              </div> {/* end left column wrapper */}
+
+              {/* Right: Aggregated materials */}
+              <div className="flex flex-col gap-1.5">
+                <div className="text-[10px] uppercase tracking-wider text-eve-muted">
+                  Materials — {aggMats.length} types
+                  {missingCount > 0 && <span className="text-eve-red ml-2">{missingCount} missing</span>}
+                </div>
+                <div className="eve-panel divide-y divide-eve-border/20 max-h-[600px] overflow-y-auto">
+                  {aggMats.map(mat => (
+                    <div key={mat.typeId} className="flex items-center gap-2 px-2 py-1">
+                      <span className={`text-[9px] shrink-0 ${mat.need > 0 ? 'text-eve-red' : 'text-eve-green'}`}>{mat.need > 0 ? '✗' : '✓'}</span>
+                      <span className="flex-1 text-[10px] text-eve-text truncate">{mat.name}</span>
+                      <span className="text-[10px] shrink-0">
+                        {mat.need > 0
+                          ? <span className="text-eve-red">{mat.need.toLocaleString()}<span className="text-eve-dim">/{mat.qty.toLocaleString()}</span></span>
+                          : <span className="text-eve-muted">{mat.qty.toLocaleString()}</span>}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+            </div>
+          </div>
+        )
+      })() : !activeBlueprint ? (
         <div className="flex flex-col items-center justify-center text-center gap-2 py-12">
           <div className="text-eve-cyan/20 text-4xl">◈</div>
           <div className="text-eve-muted text-xs">Search for a blueprint above,</div>
@@ -1134,132 +1508,485 @@ function BlueprintCalculator({
 
       {data && !loading && (
         <>
-          {/* ── Time + breakdown ──────────────────────────────────── */}
-          <div className="eve-panel p-3 flex flex-col gap-2">
-            <div className="flex items-baseline justify-between">
-              <div>
-                <div className="eve-header mb-0.5">MANUFACTURING TIME</div>
-                <div className="text-eve-cyan font-mono text-sm">{formatTime(data.adjustedTime)}</div>
-                <div className="text-eve-dim text-[9px]">
-                  Base {formatTime(data.baseTime)} per run
-                  {data.adjustedTime < data.baseTime * runs && ` · saves ${formatTime(data.baseTime * runs - data.adjustedTime)}`}
-                </div>
-              </div>
-              <div className="text-right text-[10px]">
-                <div className="text-eve-muted">{runs} run{runs !== 1 ? 's' : ''}</div>
-                {data.productQty * runs > 1 && (
-                  <div className="text-eve-text">{(data.productQty * runs).toLocaleString()} units out</div>
-                )}
-              </div>
-            </div>
-            {data.timeBreakdown.length > 0 && (
-              <div className="border-t border-eve-border/40 pt-2">
-                <div className="eve-label text-[9px] mb-1">REDUCTION BREAKDOWN</div>
-                <div className="space-y-px">
-                  {data.timeBreakdown.map((row, i) => (
-                    <div key={i} className="flex items-center justify-between text-[10px]">
-                      <span className="text-eve-muted">{row.label}</span>
-                      <span className="text-eve-green font-mono">−{row.pct.toFixed(1)}%</span>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
-          </div>
+          {/* ── Profitability ──────────────────────────────────────── */}
+          {(() => {
+            const sci         = parseFloat(profitSCI) || 0
+            const structBonus = structInfo.costReduction
+            const facTax      = parseFloat(profitFacilityTax) || 0
+            const SCC         = 4
 
-          {/* ── Required Skills ────────────────────────────────────── */}
-          {data.requiredSkills.length > 0 && (() => {
-            const skillMap = new Map(skills.map(s => [s.skillId, s.trainedLevel]))
-            const canManufacture = data.requiredSkills.every(s => (skillMap.get(s.typeId) ?? 0) >= s.requiredLevel)
+            const hasPrices    = data.productTypeId != null && jitaPrices[data.productTypeId] != null
+            const productPrice = data.productTypeId ? (jitaPrices[data.productTypeId]?.bestSell ?? null) : null
+            const totalUnits   = data.productQty * runs
+
+            // matCost = what you spend buying materials at Jita sell prices
+            let matCost = 0
+            let matCostKnown = hasPrices
+            for (const mat of enrichedMaterials) {
+              const p = jitaPrices[mat.typeId]?.bestSell
+              if (p == null) { matCostKnown = false; break }
+              matCost += mat.adjQty * p
+            }
+
+            // EIV = sum(adjusted_price × qty) — CCP's market equilibrium prices, used for job cost
+            let eiv = 0
+            let eivKnown = matCostKnown
+            for (const mat of enrichedMaterials) {
+              const ap = jitaPrices[mat.typeId]?.adjustedPrice
+              if (ap == null) { eivKnown = false; break }
+              eiv += mat.adjQty * ap
+            }
+
+            // Job cost breakdown (correct EVE formula):
+            //   grossSCI       = EIV × SCI%
+            //   structBonusAmt = grossSCI × structBonus%   (reduces gross SCI)
+            //   netSCI         = grossSCI − structBonusAmt
+            //   facilityTax    = EIV × facTax%
+            //   scc            = EIV × 4%
+            //   total          = netSCI + facilityTax + scc
+            const grossSCI       = eivKnown ? eiv * sci / 100 : null
+            const structBonusAmt = grossSCI != null ? grossSCI * structBonus / 100 : null
+            const netSCI         = grossSCI != null && structBonusAmt != null ? grossSCI - structBonusAmt : null
+            const facTaxAmt      = eivKnown ? eiv * facTax / 100 : null
+            const sccAmt         = eivKnown ? eiv * SCC / 100 : null
+            const jobCost        = netSCI != null && facTaxAmt != null && sccAmt != null ? netSCI + facTaxAmt + sccAmt : null
+
+            const SALES_TAX = 0.036
+            const BROKER    = 0.03
+            const productSellGross = productPrice != null ? productPrice * totalUnits : null
+            const productSellNet   = productSellGross != null
+              ? productSellGross * (1 - SALES_TAX) * (1 - BROKER) : null
+
+            const profit = productSellNet != null && matCostKnown && jobCost != null ? productSellNet - matCost - jobCost : null
+            const margin = profit != null && productSellNet ? (profit / productSellNet) * 100 : null
+
             return (
-              <div className="eve-panel p-3">
-                <div className="eve-header mb-2 flex items-center justify-between">
-                  <span>REQUIRED SKILLS</span>
-                  <span className={`text-[9px] border px-1.5 py-0.5 ${canManufacture ? 'border-eve-green text-eve-green' : 'border-eve-orange text-eve-orange'}`}>
-                    {canManufacture ? 'CAN BUILD' : 'MISSING SKILLS'}
-                  </span>
+              <div className="eve-panel p-3 flex flex-col gap-2">
+                <div className="flex items-center justify-between">
+                  <button
+                    onClick={() => setProfitOpen(v => !v)}
+                    className="flex items-center gap-2 text-eve-gold hover:text-eve-text transition-colors"
+                  >
+                    {profitOpen ? <ChevronDown size={10} /> : <ChevronRightIcon size={10} />}
+                    <span className="eve-header mb-0">PROFITABILITY</span>
+                  </button>
+                  <div className="flex items-center gap-2">
+                    {profit != null && (
+                      <span className={`text-xs font-mono ${profit > 0 ? 'text-eve-green' : 'text-eve-red'}`}>
+                        {profit > 0 ? '+' : ''}{formatISK(profit)}
+                        {margin != null && <span className="text-[9px] ml-1 text-eve-dim">({margin.toFixed(1)}%)</span>}
+                      </span>
+                    )}
+                    <button
+                      onClick={() => fetchJitaPrices()}
+                      disabled={jitaLoading}
+                      className="text-[9px] border border-eve-gold/40 text-eve-gold hover:border-eve-gold hover:bg-eve-gold/10 px-1.5 py-0.5 transition-colors disabled:opacity-40"
+                    >
+                      {jitaLoading ? '…' : 'REFRESH'}
+                    </button>
+                  </div>
                 </div>
-                <div className="space-y-1">
-                  {data.requiredSkills.map(s => {
-                    const have = skillMap.get(s.typeId) ?? 0
-                    const ok = have >= s.requiredLevel
-                    return (
-                      <div key={s.typeId} className="flex items-center justify-between text-[10px]">
-                        <div className="flex items-center gap-1.5">
-                          {ok ? <CheckCircle2 size={10} className="text-eve-green shrink-0" />
-                              : <XCircle      size={10} className="text-eve-orange shrink-0" />}
-                          <span className={ok ? 'text-eve-text' : 'text-eve-orange'}>{s.name}</span>
+
+                {jitaError && <div className="text-eve-red text-[10px]">{jitaError}</div>}
+
+                <AnimatePresence>
+                  {profitOpen && (
+                    <motion.div
+                      initial={{ opacity: 0, height: 0 }}
+                      animate={{ opacity: 1, height: 'auto' }}
+                      exit={{ opacity: 0, height: 0 }}
+                      className="overflow-hidden"
+                    >
+                      {/* Job cost parameters */}
+                      <div className="border-t border-eve-border/40 pt-2 mb-3">
+                        <div className="eve-label text-[9px] mb-1.5">JOB COST PARAMETERS</div>
+                        <div className="grid grid-cols-2 gap-2">
+                          {[
+                            { label: 'SCI %', val: profitSCI, set: (v: string) => { setProfitSCI(v); saveProfitPrefs(v, profitFacilityTax) } },
+                            { label: 'FACILITY TAX %', val: profitFacilityTax, set: (v: string) => { setProfitFacilityTax(v); saveProfitPrefs(profitSCI, v) } },
+                          ].map(field => (
+                            <div key={field.label}>
+                              <div className="eve-label text-[9px] mb-0.5">{field.label}</div>
+                              <input
+                                type="number" min="0" step="0.1"
+                                className="eve-input w-full py-0.5 text-xs text-right"
+                                value={field.val}
+                                onChange={e => field.set(e.target.value)}
+                              />
+                            </div>
+                          ))}
                         </div>
-                        <div className="flex items-center gap-2 font-mono">
-                          <span className="text-eve-dim">Req L{s.requiredLevel}</span>
-                          <span className={ok ? 'text-eve-green' : 'text-eve-orange'}>
-                            {skills.length > 0 ? `Have L${have}` : <span className="text-eve-dim italic text-[9px]">no data</span>}
-                          </span>
+                        <div className="flex justify-between text-[9px] text-eve-dim mt-1.5 flex-wrap gap-x-3">
+                          {structBonus > 0 && <span>Struct role bonus: <span className="text-eve-text font-mono">−{structBonus}% of SCI</span></span>}
+                          <span>SCC: <span className="text-eve-text font-mono">4% (fixed)</span></span>
+                          {eivKnown && <span>EIV: <span className="text-eve-text font-mono">{formatISK(eiv)}</span></span>}
                         </div>
                       </div>
-                    )
-                  })}
-                </div>
-                {skills.length > 0 && (() => {
-                  const skillMap2 = new Map(skills.map(s => [s.skillId, s.trainedLevel]))
-                  const indLv = skillMap2.get(3380) ?? 0
-                  const advLv = skillMap2.get(3388) ?? 0
-                  if (indLv === 0 && advLv === 0) return null
-                  return (
-                    <div className="mt-2 pt-2 border-t border-eve-border/40">
-                      <div className="eve-label text-[9px] mb-1">SKILL TIME BONUSES</div>
-                      <div className="space-y-px">
-                        {indLv > 0 && <div className="flex justify-between text-[10px]"><span className="text-eve-muted">Industry L{indLv}</span><span className="text-eve-green font-mono">−{indLv * 4}% time</span></div>}
-                        {advLv > 0 && <div className="flex justify-between text-[10px]"><span className="text-eve-muted">Advanced Industry L{advLv}</span><span className="text-eve-green font-mono">−{advLv * 3}% time</span></div>}
-                      </div>
-                    </div>
-                  )
-                })()}
+
+                      {jitaLoading && (
+                        <div className="text-eve-muted text-[10px] animate-pulse text-center py-2">
+                          Fetching {enrichedMaterials.length + 1} prices from Jita…
+                        </div>
+                      )}
+                      {hasPrices && !jitaLoading && (
+                        <div className="space-y-1.5">
+                          {[
+                            { label: `Product sell (${totalUnits.toLocaleString()}× @ Jita)`, value: productSellGross, color: 'text-eve-text' },
+                            { label: `  Net after taxes (${((SALES_TAX + BROKER) * 100).toFixed(1)}%)`, value: productSellNet, color: 'text-eve-muted' },
+                            { label: 'Material cost (Jita buy)', value: matCostKnown ? -matCost : null, color: 'text-eve-muted' },
+                            { label: 'Job cost', value: jobCost != null ? -jobCost : null, color: 'text-eve-muted' },
+                          ].map(row => (
+                            <div key={row.label} className="flex items-baseline justify-between gap-2">
+                              <span className="text-[10px] text-eve-dim whitespace-pre">{row.label}</span>
+                              <span className={`text-[10px] font-mono shrink-0 ${row.color}`}>
+                                {row.value == null ? '—' : formatISK(row.value)}
+                              </span>
+                            </div>
+                          ))}
+
+                          {eivKnown && grossSCI != null && (
+                            <div className="pl-2 space-y-0.5 border-l border-eve-border/30">
+                              <div className="flex items-baseline justify-between gap-2">
+                                <span className="text-[9px] text-eve-dim">SCI {sci}%</span>
+                                <span className="text-[9px] font-mono text-eve-dim">{formatISK(grossSCI)}</span>
+                              </div>
+                              {structBonusAmt != null && structBonusAmt > 0 && (
+                                <div className="flex items-baseline justify-between gap-2">
+                                  <span className="text-[9px] text-eve-dim">  Struct role bonus −{structBonus}%</span>
+                                  <span className="text-[9px] font-mono text-eve-green">−{formatISK(structBonusAmt)}</span>
+                                </div>
+                              )}
+                              {netSCI != null && (
+                                <div className="flex items-baseline justify-between gap-2">
+                                  <span className="text-[9px] text-eve-dim">  Net SCI</span>
+                                  <span className="text-[9px] font-mono text-eve-dim">{formatISK(netSCI)}</span>
+                                </div>
+                              )}
+                              {facTaxAmt != null && facTaxAmt > 0 && (
+                                <div className="flex items-baseline justify-between gap-2">
+                                  <span className="text-[9px] text-eve-dim">Facility Tax {facTax}%</span>
+                                  <span className="text-[9px] font-mono text-eve-dim">{formatISK(facTaxAmt)}</span>
+                                </div>
+                              )}
+                              {sccAmt != null && (
+                                <div className="flex items-baseline justify-between gap-2">
+                                  <span className="text-[9px] text-eve-dim">SCC Surcharge 4%</span>
+                                  <span className="text-[9px] font-mono text-eve-dim">{formatISK(sccAmt)}</span>
+                                </div>
+                              )}
+                            </div>
+                          )}
+
+                          <div className="border-t border-eve-border/50 pt-1.5 flex items-center justify-between">
+                            <div className="flex items-center gap-1.5">
+                              {profit == null ? <Minus size={11} className="text-eve-dim" />
+                                : profit > 0 ? <TrendingUp size={11} className="text-eve-green" />
+                                : <TrendingDown size={11} className="text-eve-red" />}
+                              <span className="text-[10px] text-eve-gold uppercase tracking-wider">Net Profit</span>
+                            </div>
+                            <div className="flex items-center gap-2">
+                              {profit != null && <CopyBtn value={profit.toFixed(0)} />}
+                              <span className={`text-sm font-mono ${profit == null ? 'text-eve-dim' : profit > 0 ? 'text-eve-green' : 'text-eve-red'}`}>
+                                {profit == null ? '—' : `${profit > 0 ? '+' : ''}${formatISK(profit)}`}
+                              </span>
+                            </div>
+                          </div>
+                          {margin != null && (
+                            <div className="text-[9px] text-eve-dim text-right">
+                              {margin.toFixed(2)}% margin · {formatISK((profit ?? 0) / runs)} per run
+                            </div>
+                          )}
+                        </div>
+                      )}
+                    </motion.div>
+                  )}
+                </AnimatePresence>
               </div>
             )
           })()}
 
-          {/* ── Materials ──────────────────────────────────────────── */}
-          <div className="eve-panel p-3 flex flex-col">
-            <div className="eve-header mb-2 flex items-center justify-between">
-              <span>MATERIALS</span>
-              <span className="text-eve-muted font-normal text-[9px]">
-                {enrichedMaterials.filter(m => m.need === 0).length}/{enrichedMaterials.length} covered
-              </span>
-            </div>
-            <table className="w-full text-[10px]">
-              <thead>
-                <tr className="text-eve-dim border-b border-eve-border/40">
-                  <th className="text-left pb-1 font-normal">MATERIAL</th>
-                  <th className="text-right pb-1 font-normal">NEED</th>
-                  <th className="text-right pb-1 font-normal">HAVE</th>
-                  <th className="text-right pb-1 font-normal pl-2">STATUS</th>
-                </tr>
-              </thead>
-              <tbody>
-                {enrichedMaterials.map(mat => (
-                  <tr key={mat.typeId} className="border-b border-eve-border/20">
-                    <td className="py-1 text-eve-text truncate max-w-[120px]">{mat.name}</td>
-                    <td className="py-1 text-right font-mono text-eve-text">
-                      {mat.adjQty.toLocaleString()}
-                      {mat.adjQty < mat.baseQty * runs && (
-                        <span className="text-eve-dim ml-1 text-[9px]">(base {(mat.baseQty * runs).toLocaleString()})</span>
+          {/* ── Materials | Manufacturing Time | Required Skills (side by side) ── */}
+          {(() => {
+            const sci         = parseFloat(profitSCI) || 0
+            const structBonus = structInfo.costReduction
+            const facTax      = parseFloat(profitFacilityTax) || 0
+            const SCC         = 4
+
+            let eiv2 = 0
+            let eiv2Known = data.productTypeId != null && jitaPrices[data.productTypeId] != null
+            let matCost2 = 0
+            for (const mat of enrichedMaterials) {
+              const p  = jitaPrices[mat.typeId]?.bestSell
+              const ap = jitaPrices[mat.typeId]?.adjustedPrice
+              if (p == null || ap == null) { eiv2Known = false }
+              if (p  != null) matCost2 += mat.adjQty * p
+              if (ap != null) eiv2     += mat.adjQty * ap
+            }
+            const grossSCI2       = eiv2Known ? eiv2 * sci / 100 : null
+            const structBonusAmt2 = grossSCI2 != null ? grossSCI2 * structBonus / 100 : null
+            const netSCI2         = grossSCI2 != null && structBonusAmt2 != null ? grossSCI2 - structBonusAmt2 : null
+            const facTaxAmt2      = eiv2Known ? eiv2 * facTax / 100 : null
+            const sccAmt2         = eiv2Known ? eiv2 * SCC / 100 : null
+            const jobCost         = netSCI2 != null && facTaxAmt2 != null && sccAmt2 != null ? netSCI2 + facTaxAmt2 + sccAmt2 : null
+
+            const skillMap       = new Map(skills.map(s => [s.skillId, s.trainedLevel]))
+            const canManufacture = data.requiredSkills.every(s => (skillMap.get(s.typeId) ?? 0) >= s.requiredLevel)
+            const indLv          = skillMap.get(3380) ?? 0
+            const advLv          = skillMap.get(3388) ?? 0
+
+            return (
+              <div className="grid grid-cols-3 gap-2 items-start">
+
+                {/* ── Col 1: Materials ───────────────────────────────── */}
+                <div className="eve-panel p-2 flex flex-col col-span-1">
+                  <div className="eve-header mb-1 flex items-center justify-between">
+                    <span>MATERIALS</span>
+                    <span className="text-eve-muted font-normal text-[9px]">
+                      {enrichedMaterials.filter(m => m.need === 0).length}/{enrichedMaterials.length}
+                    </span>
+                  </div>
+                  <table className="w-full text-[9px]">
+                    <thead>
+                      <tr className="text-eve-dim border-b border-eve-border/40">
+                        <th className="text-left pb-1 font-normal">MAT</th>
+                        <th className="text-right pb-1 font-normal">NEED</th>
+                        <th className="text-right pb-1 font-normal pl-1">STATUS</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {enrichedMaterials.map(mat => (
+                        <tr key={mat.typeId} className="border-b border-eve-border/20">
+                          <td className="py-0.5 text-eve-text truncate max-w-[70px]" title={mat.name}>{mat.name}</td>
+                          <td className="py-0.5 text-right font-mono text-eve-text">{mat.adjQty.toLocaleString()}</td>
+                          <td className="py-0.5 pl-1 text-right">
+                            {mat.need === 0
+                              ? <CheckCircle2 size={9} className="inline text-eve-green" />
+                              : <span className="text-eve-orange font-mono">−{mat.need.toLocaleString()}</span>}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+
+                {/* ── Col 2: Manufacturing Time ───────────────────────── */}
+                <div className="eve-panel p-2 flex flex-col gap-2 col-span-1">
+                  <div className="eve-header mb-0">MFG TIME</div>
+                  <div className="text-eve-cyan font-mono text-sm">{formatTime(data.adjustedTime)}</div>
+                  <div className="text-eve-dim text-[9px]">
+                    {formatTime(data.baseTime)}/run
+                    {data.adjustedTime < data.baseTime * runs && (
+                      <span className="text-eve-green ml-1">saves {formatTime(data.baseTime * runs - data.adjustedTime)}</span>
+                    )}
+                  </div>
+                  <div className="text-[9px] text-eve-muted">{runs} run{runs !== 1 ? 's' : ''}{data.productQty * runs > 1 ? ` · ${(data.productQty * runs).toLocaleString()} out` : ''}</div>
+
+                  {data.timeBreakdown.length > 0 && (
+                    <div className="border-t border-eve-border/40 pt-1.5 space-y-px">
+                      {data.timeBreakdown.map((row, i) => (
+                        <div key={i} className="flex items-center justify-between text-[9px]">
+                          <span className="text-eve-muted truncate">{row.label}</span>
+                          <span className="text-eve-green font-mono ml-1 shrink-0">−{row.pct.toFixed(1)}%</span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+
+                  {jobCost != null && grossSCI2 != null && (
+                    <div className="border-t border-eve-border/40 pt-1.5 space-y-px">
+                      <div className="eve-label text-[9px] mb-1">JOB COST</div>
+                      <div className="flex items-center justify-between text-[9px]">
+                        <span className="text-eve-muted">SCI {sci}%</span>
+                        <span className="text-eve-orange font-mono">{formatISK(grossSCI2)}</span>
+                      </div>
+                      {structBonusAmt2 != null && structBonusAmt2 > 0 && (
+                        <div className="flex items-center justify-between text-[9px]">
+                          <span className="text-eve-muted">Struct −{structBonus}%</span>
+                          <span className="text-eve-green font-mono">−{formatISK(structBonusAmt2)}</span>
+                        </div>
                       )}
-                    </td>
-                    <td className="py-1 text-right font-mono text-eve-muted">{mat.have.toLocaleString()}</td>
-                    <td className="py-1 pl-2 text-right">
-                      {mat.need === 0
-                        ? <CheckCircle2 size={10} className="inline text-eve-green" />
-                        : <span className="text-eve-orange font-mono">−{mat.need.toLocaleString()}</span>}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+                      {facTaxAmt2 != null && facTaxAmt2 > 0 && (
+                        <div className="flex items-center justify-between text-[9px]">
+                          <span className="text-eve-muted">Tax {facTax}%</span>
+                          <span className="text-eve-orange font-mono">{formatISK(facTaxAmt2)}</span>
+                        </div>
+                      )}
+                      {sccAmt2 != null && (
+                        <div className="flex items-center justify-between text-[9px]">
+                          <span className="text-eve-muted">SCC 4%</span>
+                          <span className="text-eve-orange font-mono">{formatISK(sccAmt2)}</span>
+                        </div>
+                      )}
+                      <div className="flex items-center justify-between text-[9px] pt-0.5 border-t border-eve-border/30">
+                        <span className="text-eve-dim">Total</span>
+                        <span className="text-eve-orange font-mono">{formatISK(jobCost)}</span>
+                      </div>
+                    </div>
+                  )}
+                </div>
+
+                {/* ── Col 3: Required Skills ──────────────────────────── */}
+                <div className="eve-panel p-2 flex flex-col gap-1 col-span-1">
+                  <div className="eve-header mb-0 flex items-center justify-between">
+                    <span>SKILLS</span>
+                    {data.requiredSkills.length > 0 && (
+                      <span className={`text-[8px] border px-1 py-px ${canManufacture ? 'border-eve-green text-eve-green' : 'border-eve-orange text-eve-orange'}`}>
+                        {canManufacture ? 'OK' : 'MISSING'}
+                      </span>
+                    )}
+                  </div>
+                  {data.requiredSkills.length === 0 ? (
+                    <div className="text-eve-dim text-[9px]">None required</div>
+                  ) : (
+                    <div className="space-y-0.5">
+                      {data.requiredSkills.map(s => {
+                        const have = skillMap.get(s.typeId) ?? 0
+                        const ok   = have >= s.requiredLevel
+                        return (
+                          <div key={s.typeId} className="flex items-center justify-between text-[9px]">
+                            <div className="flex items-center gap-1 min-w-0">
+                              {ok ? <CheckCircle2 size={9} className="text-eve-green shrink-0" />
+                                  : <XCircle      size={9} className="text-eve-orange shrink-0" />}
+                              <span className={`truncate ${ok ? 'text-eve-text' : 'text-eve-orange'}`}>{s.name}</span>
+                            </div>
+                            <span className={`font-mono ml-1 shrink-0 ${ok ? 'text-eve-green' : 'text-eve-orange'}`}>
+                              {skills.length > 0 ? `L${have}/${s.requiredLevel}` : `L${s.requiredLevel}`}
+                            </span>
+                          </div>
+                        )
+                      })}
+                    </div>
+                  )}
+                  {(indLv > 0 || advLv > 0) && (
+                    <div className="border-t border-eve-border/40 pt-1 space-y-px">
+                      {indLv > 0 && <div className="flex justify-between text-[9px]"><span className="text-eve-muted">Industry L{indLv}</span><span className="text-eve-green font-mono">−{indLv * 4}%</span></div>}
+                      {advLv > 0 && <div className="flex justify-between text-[9px]"><span className="text-eve-muted">Adv Ind L{advLv}</span><span className="text-eve-green font-mono">−{advLv * 3}%</span></div>}
+                    </div>
+                  )}
+                </div>
+
+              </div>
+            )
+          })()}
+
         </>
       )}
-      </>)}
+      </> )}
+
+      {/* ── Fit Import Modal ─────────────────────────────────────── */}
+      <AnimatePresence>
+        {showFitImport && (
+          <motion.div
+            initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
+            className="fixed inset-0 z-50 flex items-center justify-center bg-black/60"
+            onClick={() => setShowFitImport(false)}
+          >
+            <motion.div
+              initial={{ scale: 0.95, opacity: 0 }} animate={{ scale: 1, opacity: 1 }} exit={{ scale: 0.95, opacity: 0 }}
+              transition={{ type: 'spring', stiffness: 300, damping: 25 }}
+              className="relative w-[540px] max-h-[80vh] flex flex-col bg-[#0a0e14] border border-eve-border shadow-2xl"
+              onClick={e => e.stopPropagation()}
+            >
+              {/* Corner brackets */}
+              <span className="absolute top-0 left-0 w-3 h-3 border-t border-l border-eve-cyan/60" />
+              <span className="absolute top-0 right-0 w-3 h-3 border-t border-r border-eve-cyan/60" />
+              <span className="absolute bottom-0 left-0 w-3 h-3 border-b border-l border-eve-cyan/60" />
+              <span className="absolute bottom-0 right-0 w-3 h-3 border-b border-r border-eve-cyan/60" />
+
+              <div className="flex items-center justify-between px-4 py-2 border-b border-eve-border">
+                <span className="text-[10px] uppercase tracking-widest text-eve-cyan">Import Fit → Blueprint Planner</span>
+                <button onClick={() => setShowFitImport(false)} className="text-eve-dim hover:text-eve-muted"><X size={12} /></button>
+              </div>
+
+              <div className="flex flex-col gap-3 p-4 overflow-y-auto">
+                {/* Saved fits dropdown */}
+                {savedFits.length > 0 && (
+                  <div className="flex gap-2 items-center">
+                    <span className="text-[10px] text-eve-muted uppercase tracking-wider shrink-0">Saved fit:</span>
+                    <select
+                      className="flex-1 bg-black/30 border border-eve-border text-xs text-eve-text px-2 py-1 outline-none"
+                      onChange={e => {
+                        const fit = savedFits.find(f => f.id === e.target.value)
+                        if (fit) { setFitImportText(fit.fitText); setFitImportResults(null) }
+                      }}
+                      defaultValue=""
+                    >
+                      <option value="" disabled>Select a saved fit…</option>
+                      {savedFits.map(f => <option key={f.id} value={f.id}>{f.name}</option>)}
+                    </select>
+                  </div>
+                )}
+
+                {/* EFT paste area */}
+                <textarea
+                  className="w-full h-32 bg-black/30 border border-eve-border text-[11px] text-eve-text font-mono px-2 py-1.5 outline-none resize-none placeholder:text-eve-dim"
+                  placeholder="Paste EFT fit here…"
+                  value={fitImportText}
+                  onChange={e => { setFitImportText(e.target.value); setFitImportResults(null) }}
+                />
+
+                <button
+                  onClick={resolveFit}
+                  disabled={!fitImportText.trim() || fitImportLoading}
+                  className="eve-btn-primary text-[10px] uppercase tracking-wider py-1.5 disabled:opacity-40"
+                >
+                  {fitImportLoading ? 'Resolving…' : 'Resolve Blueprints'}
+                </button>
+
+                {fitImportError && (
+                  <div className="text-eve-red text-[11px]">{fitImportError}</div>
+                )}
+
+                {/* Results table */}
+                {fitImportResults && (
+                  <div className="flex flex-col gap-1">
+                    <div className="flex items-center justify-between mb-1">
+                      <span className="text-[10px] text-eve-muted uppercase tracking-wider">
+                        {fitImportResults.filter(r => r.hasBlueprint).length} / {fitImportResults.length} items have blueprints
+                      </span>
+                      <button
+                        onClick={loadFitPlan}
+                        disabled={fitImportResults.filter(r => r.hasBlueprint).length === 0}
+                        className="eve-btn-primary text-[10px] uppercase tracking-wider px-3 py-1 disabled:opacity-40"
+                      >
+                        Build Plan (All)
+                      </button>
+                    </div>
+                    <div className="border border-eve-border divide-y divide-eve-border/40 max-h-48 overflow-y-auto">
+                      {fitImportResults.map((item, i) => (
+                        <div key={i} className="flex items-center gap-2 px-2 py-1">
+                          <div className="shrink-0">
+                            {item.hasBlueprint
+                              ? <CheckCircle2 size={10} className="text-eve-green" />
+                              : <XCircle size={10} className="text-eve-red" />}
+                          </div>
+                          <div className="flex-1 min-w-0">
+                            <div className="text-[11px] text-eve-text truncate">{item.name}</div>
+                            {item.blueprintName && <div className="text-[9px] text-eve-muted truncate">{item.blueprintName}</div>}
+                          </div>
+                          <div className="text-[10px] text-eve-dim shrink-0">×{item.qty}</div>
+                          {item.hasBlueprint && item.blueprintTypeId && item.blueprintName && (
+                            <button
+                              onClick={() => {
+                                setActiveBlueprint({ typeId: item.blueprintTypeId!, typeName: item.blueprintName!, me: 0, te: 0, runs: item.qty })
+                                setMe(0); setTe(0); setRuns(item.qty)
+                                setShowFitImport(false)
+                              }}
+                              className="shrink-0 text-[9px] uppercase tracking-wider text-eve-cyan border border-eve-cyan/40 px-1.5 py-0.5 hover:bg-eve-cyan/10 transition-colors"
+                            >
+                              Load
+                            </button>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
 
       {/* ── Steps Popout (portal-like fixed overlay) ─────────────── */}
       <AnimatePresence>

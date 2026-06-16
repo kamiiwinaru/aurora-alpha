@@ -73,6 +73,7 @@ function parseLogContent(text: string): { channelName: string; entries: IntelEnt
 
   const entries: IntelEntry[] = []
   const lineRe = /^\s*\[\s*(\d{4}\.\d{2}\.\d{2}\s+\d{2}:\d{2}:\d{2})\s*\]\s*([^>]+?)\s*>\s*(.+)$/
+  let lineIndex = 0
 
   for (const line of lines) {
     const m = line.match(lineRe)
@@ -82,7 +83,7 @@ function parseLogContent(text: string): { channelName: string; entries: IntelEnt
     if (isNaN(timestamp.getTime())) continue
     if (character.trim() === 'EVE System') continue
     entries.push({
-      id: `${ts}-${character.trim()}`,
+      id: `${ts}-${character.trim()}-${lineIndex++}`,
       timestamp,
       character: character.trim(),
       message: message.trim(),
@@ -108,7 +109,7 @@ function formatAge(ts: Date): string {
 
 let _audioCtx: AudioContext | null = null
 
-interface AlertDetail { urgency: 'near' | 'mid'; system?: string; jumps?: number; count?: number; characters?: string[]; ships?: string[] }
+interface AlertDetail { urgency: 'near' | 'mid' | 'clear'; system?: string; jumps?: number; count?: number; characters?: string[]; ships?: string[] }
 let _onAlertFired: ((d: AlertDetail) => void) | null = null
 
 async function playAlert(d: AlertDetail) {
@@ -121,7 +122,7 @@ async function playAlert(d: AlertDetail) {
     const ctx  = _audioCtx
     const gain = ctx.createGain()
     gain.connect(ctx.destination)
-    const freqs = d.urgency === 'near' ? [880, 1100, 880] : [660, 880]
+    const freqs = d.urgency === 'near' ? [880, 1100, 880] : d.urgency === 'clear' ? [660, 440] : [660, 880]
     // 80 ms head room — gives the resume() call time to lift suspension before
     // the first note starts. 10 ms was too tight when context was resuming.
     let t = ctx.currentTime + 0.08
@@ -615,13 +616,15 @@ export default function IntelPanel({ shipLocation, characterId, characterName, o
   })
   const [autoLoadStatus, setAutoLoadStatus] = useState<string | null>('Loading logs...')
   const [alertFlash, setAlertFlash] = useState<'near' | 'mid' | null>(null)
-  const [debugPoll, setDebugPoll] = useState<{ n: number; chans: number; newE: number } | null>(null)
+  const [debugPoll, setDebugPoll] = useState<{ n: number; chans: number } | null>(null)
 
   // Register the module-level alert notifier so playAlert() can update React state
   useEffect(() => {
     _onAlertFired = (d) => {
-      setAlertFlash(d.urgency)
-      setTimeout(() => setAlertFlash(null), 2000)
+      if (d.urgency !== 'clear') {
+        setAlertFlash(d.urgency)
+        setTimeout(() => setAlertFlash(null), 2000)
+      }
       window.dispatchEvent(new CustomEvent('aurora_intel_alert', { detail: d }))
     }
     return () => { _onAlertFired = null }
@@ -704,6 +707,16 @@ export default function IntelPanel({ shipLocation, characterId, characterName, o
     }
     if (systemsInMsg.size === 0) return
 
+    // Clear reports — soft tone, no hostile urgency
+    if (entry.category === 'clear') {
+      const sys = [...systemsInMsg][0]
+      const now = Date.now()
+      if (sys && (now - (recentAlertedSys.get(`clr-${sys.toLowerCase()}`) ?? 0)) < ALERT_COOLDOWN_MS) return
+      if (sys) recentAlertedSys.set(`clr-${sys.toLowerCase()}`, now)
+      await playAlert({ urgency: 'clear', system: sys })
+      return
+    }
+
     const extraCount = (entry.message.match(/\+(\d+)/) ?? [])[1]
     const count      = extraCount ? parseInt(extraCount, 10) : undefined
     const spans      = buildSpans(entry.message)
@@ -781,7 +794,6 @@ export default function IntelPanel({ shipLocation, characterId, characterName, o
         character: raw.character,
         message: raw.message,
         category: raw.category as IntelEntry['category'],
-        spans: buildSpans(raw.message),
       }
 
       // Update channel display
@@ -802,7 +814,7 @@ export default function IntelPanel({ shipLocation, characterId, characterName, o
       setTopZ(z => z + 1)
 
       debugPollCountRef.current++
-      setDebugPollRef.current({ n: debugPollCountRef.current, chans: channelsRef.current.length, newE: 1 })
+      setDebugPollRef.current({ n: debugPollCountRef.current, chans: channelsRef.current.length })
 
       checkAlert(entry)
     })
@@ -813,18 +825,18 @@ export default function IntelPanel({ shipLocation, characterId, characterName, o
     })
   }, [checkAlert])
 
-  // Connect on mount, disconnect on unmount
+  // Connect on mount (using characterName already in the ref), disconnect on unmount
   useEffect(() => {
     connectSSE()
     return () => { esRef.current?.close(); esRef.current = null }
   }, [connectSSE])
 
-  // Reconnect when character name becomes available (SSE connected before login resolved)
-  const prevListenerRef = useRef<string | null | undefined>(undefined)
+  // Reconnect only when characterName actually changes after initial connect
+  const prevListenerRef = useRef<string | null | undefined>(characterName) // init to current value, not undefined
   useEffect(() => {
     if (characterName === prevListenerRef.current) return
     prevListenerRef.current = characterName
-    if (esRef.current) connectSSE() // reconnect with updated listener param
+    if (esRef.current) connectSSE()
   }, [characterName, connectSSE])
 
   // Manual RELOAD: reset state and reconnect
@@ -925,7 +937,7 @@ export default function IntelPanel({ shipLocation, characterId, characterName, o
         )}
         {debugPoll && (
           <span className="text-[8px] font-mono text-eve-dim shrink-0">
-            poll#{debugPoll.n} ch:{debugPoll.chans} new:{debugPoll.newE}
+            {debugPoll.n} entries · {debugPoll.chans} ch
           </span>
         )}
         {alertFlash && (

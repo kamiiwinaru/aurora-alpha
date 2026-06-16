@@ -127,19 +127,6 @@
     ]
   },
   {
-    "id": "lan-server",
-    "title": "LAN Server Deployment",
-    "status": "consideration",
-    "category": "Infrastructure",
-    "description": "Explore moving Aurora off the local desktop and onto a dedicated server machine, accessible from any device on the LAN via a URL.",
-    "notes": [
-      "Would require separating frontend (browser) from backend (ESI auth, AI calls, intel parser)",
-      "ESI OAuth redirect_uri must match — local network URL needs to be registered or proxied",
-      "Voice input/output may need browser mic permissions over LAN (HTTPS or localhost exception)",
-      "Investigate: Electron → web app conversion, or just expose the dev server securely"
-    ]
-  },
-  {
     "id": "734bb3e8-1a86-4901-ab4e-08549823c997",
     "title": "Settings Cog Menu — Standalone Version",
     "description": "Add a settings/cog icon at the top of the interface (next to minimize button) for user-configurable options. Initial focus is microphone device selection, previously supported via Chrome APIs, but the menu should be extensible for future settings.",
@@ -281,7 +268,7 @@
     "id": "b888fcb4-a655-48e7-a711-3054b8a61d98",
     "title": "Build vs. Buy Advisor",
     "description": "A dedicated UI flow within the Blueprint Analyzer panel that automatically orchestrates blueprint checking, material cost appraisal, and market price comparison to produce a build vs. buy recommendation for any item or fit.",
-    "status": "planned",
+    "status": "done",
     "category": "EVE Data",
     "notes": [
       "Integrate into the existing Blueprint Analyzer panel as an additional mode",
@@ -298,7 +285,7 @@
     "id": "5e6a6b6d-acca-437a-8bae-be65a0b8b140",
     "title": "LP Store Optimizer",
     "description": "Ranks LP store redemption options by ISK/LP ratio across all of the pilot's LP wallets. Pulls public LP store offers via ESI (no auth required for store data), appraises outputs at Jita market prices, and calculates net ISK per LP spent to identify the best redemption targets.",
-    "status": "planned",
+    "status": "in-progress",
     "category": "EVE Data",
     "notes": [
       "LP store offers endpoint is fully public — no auth scope needed, cache aggressively and keep local",
@@ -474,6 +461,34 @@
       "Suggests the best decryptor to use from the pilot's current inventory",
       "Should factor in decryptor cost vs. outcome value (probability bonus, ME/TE/runs on resulting BPC)",
       "Compare all applicable decryptors side-by-side including no-decryptor baseline"
+    ]
+  },
+  {
+    "id": "92a84dd1-52bc-48d0-9ea9-ea2180885c62",
+    "title": "Changelog Popup on App Update",
+    "description": "Display a changelog popup to the pilot when the app updates to a new version, summarising what's new, changed, or fixed since their last session.",
+    "status": "planned",
+    "category": "General",
+    "notes": [
+      "Detect version change on load (compare stored version vs current)",
+      "Fetch or embed changelog content per version",
+      "Display modal/popup with structured list of changes (new features, bug fixes, improvements)",
+      "Option to dismiss and not show again for that version",
+      "Consider linking to full roadmap or patch notes from within the popup"
+    ]
+  },
+  {
+    "id": "cc897392-7fbb-4a23-a3a6-c39272e887b1",
+    "title": "Import fit from Fit Analyzer into Blueprint Planner",
+    "description": "Allow pilots to import a ship fit directly from the Fit Analyzer into the Blueprint Planner, automatically resolving the full build tree — hull, modules, rigs, charges, and drones — into their corresponding blueprints and material requirements for a one-click production plan.",
+    "status": "planned",
+    "category": "EVE Data",
+    "notes": [
+      "Resolve each fit item to its blueprint (hull + all modules, rigs, ammo, drones)",
+      "Support nested builds (e.g. T2 modules that themselves require component BPs)",
+      "Show aggregated material list across all blueprints in the fit",
+      "Flag any missing blueprints in the pilot's inventory",
+      "Option to queue all resolved jobs directly from the import view"
     ]
   }
 ]

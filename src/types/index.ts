@@ -202,8 +202,16 @@ export interface EveLoyaltyPoint {
 export interface EveNotification {
   notificationId: number
   type: string
+  senderId?: number
   timestamp: string
+  isRead: boolean
   text: string
+}
+
+export interface EveMailRecipient {
+  recipientId: number
+  recipientName?: string
+  recipientType: 'character' | 'corporation' | 'alliance' | 'mailing_list'
 }
 
 export interface EveMail {
@@ -214,13 +222,20 @@ export interface EveMail {
   timestamp: string
   isRead: boolean
   labelIds: number[]
+  recipients: EveMailRecipient[]
   body?: string
 }
 
 export interface EveMailLabel {
   labelId: number
   name: string
+  color?: string
   unreadCount: number
+}
+
+export interface EveMailingList {
+  mailingListId: number
+  name: string
 }
 
 export interface JaniceItem {
@@ -243,4 +258,4 @@ export interface JaniceAppraisal {
   code?: string
 }
 
-export type ActivePanel = 'chat' | 'notifications' | 'skills' | 'industry' | 'assets' | 'market' | 'janice' | 'zkill' | 'intel' | 'roadmap' | 'map' | 'landing' | 'landing-login'
+export type ActivePanel = 'chat' | 'notifications' | 'skills' | 'industry' | 'assets' | 'market' | 'janice' | 'zkill' | 'intel' | 'roadmap' | 'map' | 'pve' | 'landing' | 'landing-login'

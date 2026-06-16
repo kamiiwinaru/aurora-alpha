@@ -6,6 +6,7 @@ export default defineConfig({
   base: process.env.ELECTRON === 'true' ? './' : '/',
   server: {
     open: false,
+    host: '127.0.0.1',
     port: 5173,
     proxy: {
       '/api': {

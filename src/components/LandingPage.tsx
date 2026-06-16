@@ -6,6 +6,7 @@ import FeedbackModal from './FeedbackModal'
 import type { EveCharacter, EveSkill, EveShipLocation, EveCharacterAttributes, EveMail, EveMailLabel, EveContract, EveNotification, EveWalletTransaction, EveWalletJournalEntry } from '../types'
 import { renderMessage } from '../lib/intel-highlight'
 import { useVoiceInput, type VoicePhase } from '../hooks/useVoiceInput'
+import { notifLabel, notifCategory, notifSnippet, NOTIF_CATEGORY_COLOR } from '../lib/notif-utils'
 
 import AURORA_IMG from '../assets/Aurora1.png'
 
@@ -700,6 +701,7 @@ function MailFeed({ mail, mailLabels, notifications, onOpenNotifications }: { ma
   }, [mail, labelNameMap])
 
   const notifCount = notifications.length
+  const unreadNotifCount = notifications.filter(n => !n.isRead).length
   const allTabs = ['Unread', 'Notif', ...TAB_ORDER.slice(1)]
   const visibleTabs = allTabs.filter(t => {
     if (t === 'Unread') return true
@@ -722,7 +724,7 @@ function MailFeed({ mail, mailLabels, notifications, onOpenNotifications }: { ma
       {/* Left tabs */}
       <div className="flex flex-col border-r border-eve-border/30 shrink-0 overflow-y-auto" style={{ minWidth: 90 }}>
         {visibleTabs.map(tab => {
-          const count = tab === 'Notif' ? notifCount : (tabCounts[tab] ?? 0)
+          const count = tab === 'Notif' ? (unreadNotifCount || notifCount) : (tabCounts[tab] ?? 0)
           const active = activeTab === tab
           return (
             <button
@@ -747,24 +749,34 @@ function MailFeed({ mail, mailLabels, notifications, onOpenNotifications }: { ma
         {activeTab === 'Notif' ? (
           notifications.length === 0 ? (
             <div className="p-3 text-eve-dim text-[9px] font-mono">No notifications</div>
-          ) : notifications.map(n => (
-            <button
-              key={n.notificationId}
-              className="w-full flex items-start gap-2 px-2 py-1.5 text-left border-b border-eve-border/20 hover:bg-eve-border/10 transition-colors"
-              onClick={() => onOpenNotifications?.()}
-            >
-              <div className="flex-1 min-w-0">
-                <div className="flex items-baseline justify-between gap-1">
-                  <span className="text-[10px] font-mono truncate text-eve-muted">
-                    {n.type.replace(/([A-Z])/g, ' $1').trim()}
-                  </span>
-                  <span className="text-[8px] text-eve-dim shrink-0">
-                    {new Date(n.timestamp).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}
-                  </span>
+          ) : notifications.map(n => {
+            const cat = notifCategory(n.type)
+            const colors = NOTIF_CATEGORY_COLOR[cat]
+            const snippet = notifSnippet(n.text)
+            const isHighAlert = cat === 'kill' || cat === 'war' || (cat === 'structure' && /Attack|Destroyed|Lost/.test(n.type))
+            return (
+              <button
+                key={n.notificationId}
+                className={`w-full flex items-start gap-2 px-2 py-1.5 text-left border-b border-eve-border/20 hover:bg-eve-border/10 transition-colors border-l-2 ${isHighAlert ? colors.bg : n.isRead ? 'border-l-transparent' : 'border-l-eve-cyan/40'}`}
+                onClick={() => onOpenNotifications?.()}
+              >
+                <span className={`mt-[5px] shrink-0 w-1.5 h-1.5 rounded-full ${n.isRead ? 'bg-transparent border border-eve-border/30' : colors.dot}`} />
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-baseline justify-between gap-1">
+                    <span className={`text-[10px] font-mono truncate ${n.isRead ? 'text-eve-muted' : isHighAlert ? colors.text : 'text-eve-text'}`}>
+                      {notifLabel(n.type)}
+                    </span>
+                    <span className="text-[8px] text-eve-dim shrink-0">
+                      {new Date(n.timestamp).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}
+                    </span>
+                  </div>
+                  {snippet && (
+                    <div className="text-[9px] text-eve-dim truncate mt-0.5">{snippet}</div>
+                  )}
                 </div>
-              </div>
-            </button>
-          ))
+              </button>
+            )
+          })
         ) : filtered.length === 0 ? (
           <div className="p-3 text-eve-dim text-[9px] font-mono">No messages</div>
         ) : (
@@ -1239,9 +1251,9 @@ function CharacterShowcase(props: Omit<Props, 'character'> & { character: EveCha
             <div className="flex flex-col gap-2 flex-1 min-w-0">
               <div className="eve-label text-[9px] flex items-center gap-2 shrink-0">
                 NOTIFICATIONS
-                {((mail?.filter(m => !m.isRead).length ?? 0) + (notifications?.length ?? 0)) > 0 && (
+                {((mail?.filter(m => !m.isRead).length ?? 0) + (notifications?.filter(n => !n.isRead).length ?? 0)) > 0 && (
                   <span className="px-1.5 py-0.5 bg-eve-cyan/15 text-eve-cyan text-[8px] border border-eve-cyan/30">
-                    {(mail?.filter(m => !m.isRead).length ?? 0) + (notifications?.length ?? 0)} NEW
+                    {(mail?.filter(m => !m.isRead).length ?? 0) + (notifications?.filter(n => !n.isRead).length ?? 0)} NEW
                   </span>
                 )}
               </div>
