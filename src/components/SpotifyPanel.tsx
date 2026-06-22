@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { AnimatePresence, motion } from 'framer-motion'
 import { isSpotifyConnected, startSpotifyLogin, disconnectSpotify } from '../lib/spotify/client'
-import { getPlaybackState, play, pause, skipNext, skipPrev, setVolume, saveTrack, unsaveTrack, isTrackSaved, getUserPlaylists, createPlaylist, addTrackToPlaylist, SpotifyPlaylist, PlaybackState } from '../lib/spotify/controller'
+import { getPlaybackState, play, pause, skipNext, skipPrev, setVolume, setShuffle, saveTrack, unsaveTrack, isTrackSaved, getUserPlaylists, createPlaylist, addTrackToPlaylist, SpotifyPlaylist, PlaybackState } from '../lib/spotify/controller'
 import { captureBaseline } from '../lib/spotify/ducker'
 
 export const SPOTIFY_CONNECTED_EVENT = 'aurora_spotify_connected'
@@ -19,6 +19,7 @@ export default function SpotifyPanel({ anchorRef, open, onClose }: Props) {
   const [loading, setLoading]         = useState(false)
   const [vol, setVol]                 = useState<number | null>(null)
   const [liked, setLiked]             = useState(false)
+  const [shuffleOn, setShuffleOn]     = useState(false)
   const [showPlaylists, setShowPlaylists] = useState(false)
   const [playlists, setPlaylists]     = useState<SpotifyPlaylist[]>([])
   const [playlistsLoading, setPlaylistsLoading] = useState(false)
@@ -46,6 +47,7 @@ export default function SpotifyPanel({ anchorRef, open, onClose }: Props) {
         const state = await getPlaybackState()
         setPlayback(state)
         if (state && vol === null) setVol(state.volumePct)
+        if (state) setShuffleOn(state.shuffleState)
         const trackId = state?.track?.id ?? null
         if (trackId && trackId !== lastTrackIdRef.current) {
           lastTrackIdRef.current = trackId
@@ -274,7 +276,15 @@ export default function SpotifyPanel({ anchorRef, open, onClose }: Props) {
           </div>
 
           {/* ── Transport controls ── */}
-          <div className="flex items-center justify-center gap-4 px-3 py-2.5 border-b border-eve-border">
+          <div className="flex items-center justify-center gap-3 px-3 py-2.5 border-b border-eve-border">
+            <button
+              onClick={() => cmd(async () => { await setShuffle(!shuffleOn); setShuffleOn(s => !s) })}
+              disabled={loading}
+              title={shuffleOn ? 'Shuffle on' : 'Shuffle off'}
+              className={`transition-colors disabled:opacity-40 ${shuffleOn ? 'text-[#1DB954]' : 'text-eve-dim hover:text-eve-muted'}`}
+            >
+              <ShuffleIcon />
+            </button>
             <CtrlBtn disabled={loading} onClick={() => cmd(skipPrev)} title="Previous">
               <PrevIcon />
             </CtrlBtn>
@@ -364,6 +374,7 @@ function HeartIcon({ filled }: { filled: boolean }) {
     ? <svg width="12" height="12" viewBox="0 0 24 24" fill="#1DB954"><path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"/></svg>
     : <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="text-eve-dim hover:text-[#1DB954] transition-colors"><path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"/></svg>
 }
+function ShuffleIcon() { return <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><path d="M10.59 9.17L5.41 4 4 5.41l5.17 5.17 1.42-1.41zM14.5 4l2.04 2.04L4 18.59 5.41 20 17.96 7.46 20 9.5V4h-5.5zm.33 9.41l-1.41 1.41 3.13 3.13L14.5 20H20v-5.5l-2.04 2.04-3.13-3.13z"/></svg> }
 function PlayIcon()  { return <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg> }
 function PauseIcon() { return <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/></svg> }
 function NextIcon()  { return <svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor"><path d="M6 18l8.5-6L6 6v12zm2-8.14L11.03 12 8 14.14V9.86zM16 6h2v12h-2z"/></svg> }

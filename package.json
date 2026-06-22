@@ -1,6 +1,6 @@
 {
   "name": "aurora-alpha",
-  "version": "1.0.8",
+  "version": "1.0.9",
   "description": "Aurora Alpha — Capsuleer Intelligence System for EVE Online",
   "author": "Kami Iwinaru",
   "private": true,
@@ -12,7 +12,7 @@
     "bot": "tsx watch bot/index.ts",
     "build": "tsc && vite build",
     "preview": "vite preview",
-    "electron:dev": "concurrently \"npm run server\" \"npm run client\" \"npm run electron:main\"",
+    "electron:dev": "concurrently \"npm run client\" \"npm run electron:main\"",
     "electron:main": "tsc -p tsconfig.electron.json && electron dist-electron/main.js",
     "electron:build": "cross-env ELECTRON=true vite build && tsc -p tsconfig.electron.json && node scripts/build-server.mjs && electron-builder",
     "electron:publish": "cross-env ELECTRON=true vite build && tsc -p tsconfig.electron.json && node scripts/build-server.mjs && electron-builder --publish always"

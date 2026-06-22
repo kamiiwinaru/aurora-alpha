@@ -30,6 +30,7 @@ import UsageBar from './components/UsageBar'
 import TitleBar from './components/TitleBar'
 import OptionsMenu from './components/OptionsMenu'
 import FeedbackModal from './components/FeedbackModal'
+import PatchNotesWindow from './components/PatchNotesWindow'
 import SetupScreen from './components/SetupScreen'
 import { useChat } from './hooks/useChat'
 import { useEve } from './hooks/useEve'
@@ -93,10 +94,25 @@ export default function App() {
   )
   const [showVoiceBubble, setShowVoiceBubble] = useState(false)
   const [showVoiceSettings, setShowVoiceSettings] = useState(false)
+  const [showPatchNotes, setShowPatchNotes] = useState(false)
   const [zkillTarget, setZkillTarget] = useState<ZkillTarget | null>(null)
+  const [recentCharacterProfiles, setRecentCharacterProfiles] = useState<Array<{
+    name: string; securityStatus: number; birthday: string
+    corporation: { name: string; ticker: string; memberCount: number } | null
+    alliance: { name: string; ticker: string } | null
+    zkill: { kills: number; losses: number; iskDestroyed: number; iskLost: number }
+  }>>([])
+
+  const addCharacterProfile = (p: typeof recentCharacterProfiles[0]) => {
+    setRecentCharacterProfiles(prev => {
+      const filtered = prev.filter(x => x.name.toLowerCase() !== p.name.toLowerCase())
+      return [p, ...filtered].slice(0, 5)
+    })
+  }
   const [showWalletWindow, setShowWalletWindow] = useState(false)
   const prevPanelRef = useRef<ActivePanel>('chat')
   const [showFeedback, setShowFeedback] = useState(false)
+  const [janicePreload, setJanicePreload] = useState<string | null>(null)
   const [feedbackScreenshot, setFeedbackScreenshot] = useState<string | null>(null)
   const [freightImport, setFreightImport] = useState<{ collateral: number; volume: number } | null>(null)
   const [blueprintImport, setBlueprintImport] = useState<{ typeId: number; typeName: string; me: number; te: number; runs: number } | null>(null)
@@ -140,6 +156,7 @@ export default function App() {
     notifications: eve.notifications,
     planets: eve.planets,
     calendarEvents: eve.calendarEvents,
+    recentCharacterProfiles,
   })
 
   const intelSessionIdRef = useRef<string | null>(localStorage.getItem(INTEL_SESSION_KEY))
@@ -269,9 +286,20 @@ export default function App() {
     const handler = (e: Event) => {
       const { urgency, system, jumps, count, characters, ships } = (e as CustomEvent<{ urgency: 'near' | 'mid' | 'clear'; system?: string; jumps?: number; count?: number; characters?: string[]; ships?: string[] }>).detail
       const j = jumps ?? 0
-      const gang = count != null ? ` ${count} additional hostile${count === 1 ? '' : 's'} reported.` : ''
-      const gangShort = count != null ? ` Plus ${count} more.` : ''
-      const gangFleet = count != null ? ` They've got numbers — ${count} confirmed additional.` : ''
+      // Total pilot count: named characters + any "+N" additional
+      const namedCount = characters?.length ?? 0
+      const totalCount = namedCount + (count ?? 0)
+      // Severity tiers based on total headcount
+      const isSolo   = totalCount <= 1
+      const isSmall  = totalCount >= 2 && totalCount <= 4
+      const isSpike  = totalCount >= 5 && totalCount <= 10
+      const isFleet  = totalCount >= 11
+      // Suffix describing the group, scaled to severity
+      const suf = isSolo  ? ''
+                : isSmall ? ` ${totalCount} pilots reported.`
+                : isSpike ? ` Intel shows ${totalCount} — that's a spike.`
+                : isFleet ? ` Fleet-sized contact. ${totalCount} reported.`
+                : ''
       let text: string
       if (urgency === 'clear') {
         text = system ? pick([
@@ -287,39 +315,62 @@ export default function App() {
         return
       }
       if (system && jumps != null && urgency === 'near') {
-        text = pick([
-          `Warning. Hostile contact in ${system}. ${j} jump${j === 1 ? '' : 's'} from your position.${gang} Get safe.`,
-          `Red alert. ${system}, ${j} out. They're close.${gangShort} Safe up now.`,
-          `Contact in ${system}. ${j} jump${j === 1 ? '' : 's'}. That's too close for comfort.${gang}`,
-          `Intel spike. ${system} has hostiles, just ${j} jump${j === 1 ? '' : 's'} away.${gangFleet} I'd move if I were you.`,
-          `${system}. ${j} jump${j === 1 ? '' : 's'}. Hostile confirmed.${gang} Watch yourself out there.`,
-        ])
+        if (isFleet) {
+          text = pick([
+            `Fleet alert. ${system}, ${j} jump${j === 1 ? '' : 's'}.${suf} Get out now.`,
+            `Multiple contacts in ${system}. ${j} out.${suf} Do not engage. Safe up.`,
+            `${system} is a warzone. ${j} jump${j === 1 ? '' : 's'} from you.${suf} Move.`,
+          ])
+        } else if (isSpike) {
+          text = pick([
+            `Intel spike. ${system}, ${j} jump${j === 1 ? '' : 's'} out.${suf} Get safe.`,
+            `${system} is lighting up. ${j} out.${suf} Watch yourself.`,
+            `Spike in ${system}. ${j} jump${j === 1 ? '' : 's'} away.${suf} Safe up.`,
+          ])
+        } else {
+          text = pick([
+            `Warning. Hostile contact in ${system}. ${j} jump${j === 1 ? '' : 's'} from your position.${suf} Get safe.`,
+            `Red alert. ${system}, ${j} out.${suf} Safe up now.`,
+            `Contact in ${system}. ${j} jump${j === 1 ? '' : 's'}. That's too close for comfort.${suf}`,
+            `${system}. ${j} jump${j === 1 ? '' : 's'}. Hostile confirmed.${suf} Watch yourself.`,
+          ])
+        }
       } else if (system && jumps != null) {
-        text = pick([
-          `Heads up. Hostiles spotted in ${system}, ${j} jump${j === 1 ? '' : 's'} out.${gang}`,
-          `Intel coming in. ${system} has activity, ${j} jump${j === 1 ? '' : 's'} from you.${gangShort}`,
-          `Picking up hostile movement in ${system}. ${j} jump${j === 1 ? '' : 's'} away.${gang} Stay alert.`,
-          `${system} is lighting up. Hostiles reported, ${j} jump${j === 1 ? '' : 's'} from your location.${gangFleet}`,
-          `Contact. ${system}, ${j} jump${j === 1 ? '' : 's'}.${gang} Keep an eye on the gate.`,
-        ])
+        if (isFleet) {
+          text = pick([
+            `Fleet contact in ${system}, ${j} jump${j === 1 ? '' : 's'} out.${suf} Be aware.`,
+            `${system} has a fleet. ${j} out.${suf} Do not transit.`,
+          ])
+        } else if (isSpike) {
+          text = pick([
+            `Intel spike in ${system}, ${j} jump${j === 1 ? '' : 's'} out.${suf} Stay alert.`,
+            `${system} is lighting up. ${j} jump${j === 1 ? '' : 's'} from you.${suf}`,
+          ])
+        } else {
+          text = pick([
+            `Heads up. Hostile spotted in ${system}, ${j} jump${j === 1 ? '' : 's'} out.${suf}`,
+            `Intel coming in. ${system} has activity, ${j} jump${j === 1 ? '' : 's'} from you.${suf}`,
+            `Picking up movement in ${system}. ${j} jump${j === 1 ? '' : 's'} away.${suf} Stay alert.`,
+            `Contact. ${system}, ${j} jump${j === 1 ? '' : 's'}.${suf} Keep an eye on the gate.`,
+          ])
+        }
       } else if (system) {
         text = pick([
-          `Hostile activity reported in ${system}.${gang} Unknown distance.`,
-          `Intel ping on ${system}.${gangShort} Treat as unsafe.`,
-          `${system} flagged on intel.${gang} Proceed with caution.`,
+          `Hostile reported in ${system}.${suf} Unknown distance.`,
+          `Intel ping on ${system}.${suf} Treat as unsafe.`,
+          `${system} flagged on intel.${suf} Proceed with caution.`,
         ])
       } else if (urgency === 'near') {
         text = pick([
-          `Warning. Hostiles nearby.${gang} Safe up immediately.`,
-          `Close contact on intel.${gangShort} Get to safety now.`,
-          `They're close. Intel is pinging hostiles near your position.${gang}`,
+          `Warning. Hostiles nearby.${suf} Safe up immediately.`,
+          `Close contact on intel.${suf} Get to safety now.`,
+          `They're close. Intel pinging hostiles near your position.${suf}`,
         ])
       } else {
         text = pick([
-          `Hostile reported in the area.${gang} Stay aware.`,
-          `Intel activity. Hostiles in your region.${gangShort} Eyes open.`,
-          `New contact on intel.${gang} Don't drop your guard.`,
-          `Something's moving on intel.${gangFleet} Watch yourself.`,
+          `Hostile reported in the area.${suf} Stay aware.`,
+          `Intel activity. Hostiles in your region.${suf} Eyes open.`,
+          `New contact on intel.${suf} Don't drop your guard.`,
         ])
       }
       // Build the user-side log entry (what was reported)
@@ -365,6 +416,15 @@ export default function App() {
     window.electronAPI?.onUpdateAvailable(version => setUpdateState({ version, ready: false }))
     window.electronAPI?.onUpdateProgress(percent => setUpdateState(s => s ? { ...s, progress: percent } : null))
     window.electronAPI?.onUpdateDownloaded(version => setUpdateState({ version, ready: true }))
+  }, [])
+
+  // Auto-open patch notes when the app is newly updated
+  useEffect(() => {
+    const lastSeen = localStorage.getItem('aurora_last_seen_version')
+    if (lastSeen !== version) {
+      localStorage.setItem('aurora_last_seen_version', version)
+      if (lastSeen !== null) setShowPatchNotes(true) // skip on first ever launch
+    }
   }, [])
 
   // Spotify callback — server exchanges PKCE and redirects to /?spotify_access_token=...
@@ -618,6 +678,9 @@ export default function App() {
         <FeedbackModal activePanel={activePanel} screenshot={feedbackScreenshot} onClose={() => setShowFeedback(false)} />
       )}
 
+      {/* Patch notes window */}
+      <PatchNotesWindow open={showPatchNotes} onClose={() => setShowPatchNotes(false)} />
+
       {/* Voice settings modal */}
       {showVoiceSettings && (
         <VoiceSettingsModal
@@ -640,7 +703,13 @@ export default function App() {
           <div className="hidden md:flex items-center gap-1 text-eve-dim text-[10px]">
             <span>CAPSULEER INTELLIGENCE SYSTEM</span>
             <span className="mx-1">·</span>
-            <span>v{version}</span>
+            <button
+              onClick={() => setShowPatchNotes(true)}
+              className="hover:text-eve-cyan transition-colors"
+              title="View patch notes"
+            >
+              v{version}
+            </button>
           </div>
         </div>
         <div className="flex items-center gap-3 text-[10px] text-eve-muted">
@@ -729,6 +798,7 @@ export default function App() {
                   setZkillTarget({ query, category })
                   setActivePanel('zkill')
                 }}
+                onCharacterProfileFetched={addCharacterProfile}
               />
             </div>
             <div className={`flex-1 overflow-hidden flex flex-col ${activePanel === 'notifications' ? '' : 'hidden'}`}>
@@ -750,6 +820,8 @@ export default function App() {
                   setFreightImport({ collateral, volume })
                   setActivePanel('industry')
                 }}
+                preloadText={janicePreload}
+                onPreloadConsumed={() => setJanicePreload(null)}
               />
             </div>
             <div className={`flex-1 overflow-y-auto p-4 ${activePanel === 'pve' ? '' : 'hidden'}`}>
@@ -824,6 +896,10 @@ export default function App() {
                 onBlueprintClick={(bp) => {
                   setBlueprintImport(bp)
                   setActivePanel('industry')
+                }}
+                onAppraiseAll={(text) => {
+                  setJanicePreload(text)
+                  setActivePanel('janice')
                 }}
                 noAIMode={noAIMode}
               />

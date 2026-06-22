@@ -476,8 +476,18 @@ function StepsPopout({
   const toggleSection = (key: string) => setCollapsed(p => ({ ...p, [key]: !p[key] }))
 
   const steps = useMemo(() => chainData ? flattenChainToSteps(chainData.chain) : [], [chainData])
-  const reactions = steps.filter(s => s.activity === 'reaction')
-  const manufacturing = steps.filter(s => s.activity === 'manufacturing')
+
+  const simpleReactions  = steps.filter(s => s.activity === 'reaction' && s.inputs.every(i => i.source !== 'react'))
+  const advReactions     = steps.filter(s => s.activity === 'reaction' && s.inputs.some(i => i.source === 'react'))
+  const manufacturing    = steps.filter(s => s.activity === 'manufacturing')
+
+  // Manufacturing steps whose outputs feed a reaction come before simple reactions (e.g. fuel blocks)
+  const reactionInputIds = new Set(
+    steps.filter(s => s.activity === 'reaction')
+         .flatMap(s => s.inputs.filter(i => i.source === 'manufacture').map(i => i.typeId))
+  )
+  const mfgIntermediates = manufacturing.filter(s => reactionInputIds.has(s.typeId))
+  const mfgFinal         = manufacturing.filter(s => !reactionInputIds.has(s.typeId))
 
   const exportCSV = () => {
     if (!chainData) return
@@ -490,20 +500,25 @@ function StepsPopout({
       rows.push([esc('Materials'), esc(item.name), item.qty, item.have, Math.max(0, item.qty - item.have), '', '', '', '', '', ''].join(','))
     }
 
-    for (const step of [...reactions, ...manufacturing]) {
+    const csvSection = (step: FlatStep, label: string) => {
       const totalTime = step.timePerRun * step.runsNeeded
       if (step.inputs.length === 0) {
-        rows.push([esc(step.activity === 'reaction' ? 'Reactions' : 'Manufacturing'), esc(step.name), step.qtyNeeded, '', '', step.runsNeeded, totalTime, esc(step.activity), '', '', ''].join(','))
+        rows.push([esc(label), esc(step.name), step.qtyNeeded, '', '', step.runsNeeded, totalTime, esc(step.activity), '', '', ''].join(','))
       } else {
         step.inputs.forEach((inp, i) => {
           if (i === 0) {
-            rows.push([esc(step.activity === 'reaction' ? 'Reactions' : 'Manufacturing'), esc(step.name), step.qtyNeeded, '', '', step.runsNeeded, totalTime, esc(step.activity), esc(inp.name), inp.qty, esc(inp.source)].join(','))
+            rows.push([esc(label), esc(step.name), step.qtyNeeded, '', '', step.runsNeeded, totalTime, esc(step.activity), esc(inp.name), inp.qty, esc(inp.source)].join(','))
           } else {
             rows.push(['', '', '', '', '', '', '', '', esc(inp.name), inp.qty, esc(inp.source)].join(','))
           }
         })
       }
     }
+
+    for (const step of mfgIntermediates) csvSection(step, 'Mfg Intermediates')
+    for (const step of simpleReactions)  csvSection(step, 'Simple Reactions')
+    for (const step of advReactions)     csvSection(step, 'Advanced Reactions')
+    for (const step of mfgFinal)         csvSection(step, 'Manufacturing')
 
     const blob = new Blob([rows.join('\n')], { type: 'text/csv' })
     const url = URL.createObjectURL(blob)
@@ -581,13 +596,44 @@ function StepsPopout({
             )}
           </div>
 
-          {/* ── Reaction steps ────────────────────────────────────── */}
-          {reactions.length > 0 && (
+          {/* ── Mfg intermediates (feed into reactions, e.g. fuel blocks) ── */}
+          {mfgIntermediates.length > 0 && (
             <div>
-              <SectionHeader id="rx" icon={<Zap size={10} className="text-eve-green" />} label={`Reactions  ·  ${rxStructLabel}${system ? ' · ' + system : ''}`} count={reactions.length} color="text-eve-green" />
-              {!collapsed['rx'] && (
+              <SectionHeader id="mfg-int" icon={<Wrench size={10} className="text-eve-cyan" />} label={`Mfg Intermediates  ·  ${mfgStructLabel}${system ? ' · ' + system : ''}`} count={mfgIntermediates.length} color="text-eve-cyan" />
+              {!collapsed['mfg-int'] && (
                 <div className="pt-1 space-y-2">
-                  {reactions.map((step, i) => (
+                  {mfgIntermediates.map((step, i) => (
+                    <div key={step.key} className="pl-4 border-l border-eve-cyan/20">
+                      <div className="flex items-baseline justify-between gap-2">
+                        <span className="text-eve-cyan font-mono">
+                          <span className="text-eve-dim text-[9px] mr-1">{i + 1}.</span>
+                          {step.name} <span className="text-eve-muted">×{step.qtyNeeded.toLocaleString()}</span>
+                        </span>
+                        <span className="text-eve-dim text-[9px] shrink-0">{step.runsNeeded}r · {formatTime(step.timePerRun * step.runsNeeded)}</span>
+                      </div>
+                      <div className="mt-0.5 space-y-px pl-2">
+                        {step.inputs.map((inp, j) => (
+                          <div key={j} className="flex items-center gap-1 text-[10px] text-eve-muted">
+                            <span className="text-eve-dim">└</span>
+                            <span>{inp.name} ×{inp.qty.toLocaleString()}</span>
+                            {sourceTag(inp.source)}
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* ── Simple reactions (raw inputs only) ─────────────────── */}
+          {simpleReactions.length > 0 && (
+            <div>
+              <SectionHeader id="rx-simple" icon={<Zap size={10} className="text-eve-green" />} label={`Reactions  ·  ${rxStructLabel}${system ? ' · ' + system : ''}`} count={simpleReactions.length} color="text-eve-green" />
+              {!collapsed['rx-simple'] && (
+                <div className="pt-1 space-y-2">
+                  {simpleReactions.map((step, i) => (
                     <div key={step.key} className="pl-4 border-l border-eve-green/20">
                       <div className="flex items-baseline justify-between gap-2">
                         <span className="text-eve-green font-mono">
@@ -612,13 +658,44 @@ function StepsPopout({
             </div>
           )}
 
-          {/* ── Component manufacturing steps ─────────────────────── */}
-          {manufacturing.length > 0 && (
+          {/* ── Advanced reactions (consume reaction outputs) ──────── */}
+          {advReactions.length > 0 && (
             <div>
-              <SectionHeader id="mfg" icon={<Wrench size={10} className="text-eve-cyan" />} label={`Manufacturing  ·  ${mfgStructLabel}${system ? ' · ' + system : ''}`} count={manufacturing.length} color="text-eve-cyan" />
+              <SectionHeader id="rx-adv" icon={<Zap size={10} className="text-purple-400" />} label={`Advanced Reactions  ·  ${rxStructLabel}${system ? ' · ' + system : ''}`} count={advReactions.length} color="text-purple-400" />
+              {!collapsed['rx-adv'] && (
+                <div className="pt-1 space-y-2">
+                  {advReactions.map((step, i) => (
+                    <div key={step.key} className="pl-4 border-l border-purple-400/20">
+                      <div className="flex items-baseline justify-between gap-2">
+                        <span className="text-purple-400 font-mono">
+                          <span className="text-eve-dim text-[9px] mr-1">{i + 1}.</span>
+                          {step.name} <span className="text-eve-muted">×{step.qtyNeeded.toLocaleString()}</span>
+                        </span>
+                        <span className="text-eve-dim text-[9px] shrink-0">{step.runsNeeded}r · {formatTime(step.timePerRun * step.runsNeeded)}</span>
+                      </div>
+                      <div className="mt-0.5 space-y-px pl-2">
+                        {step.inputs.map((inp, j) => (
+                          <div key={j} className="flex items-center gap-1 text-[10px] text-eve-muted">
+                            <span className="text-eve-dim">└</span>
+                            <span>{inp.name} ×{inp.qty.toLocaleString()}</span>
+                            {sourceTag(inp.source)}
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* ── Final manufacturing steps ──────────────────────────── */}
+          {mfgFinal.length > 0 && (
+            <div>
+              <SectionHeader id="mfg" icon={<Wrench size={10} className="text-eve-cyan" />} label={`Manufacturing  ·  ${mfgStructLabel}${system ? ' · ' + system : ''}`} count={mfgFinal.length} color="text-eve-cyan" />
               {!collapsed['mfg'] && (
                 <div className="pt-1 space-y-2">
-                  {manufacturing.map((step, i) => (
+                  {mfgFinal.map((step, i) => (
                     <div key={step.key} className="pl-4 border-l border-eve-cyan/20">
                       <div className="flex items-baseline justify-between gap-2">
                         <span className="text-eve-cyan font-mono">
@@ -653,7 +730,7 @@ function StepsPopout({
               {chainData.productName} <span className="text-eve-gold">×{chainData.productQty.toLocaleString()}</span>
             </div>
             <div className="text-[9px] text-eve-dim mt-0.5">
-              {manufacturing.length + reactions.length} production job{manufacturing.length + reactions.length !== 1 ? 's' : ''} · {chainData.buyList.filter(b => b.qty > b.have).length} materials to source
+              {steps.length} production job{steps.length !== 1 ? 's' : ''} · {chainData.buyList.filter(b => b.qty > b.have).length} materials to source
             </div>
           </div>
         </>)}
@@ -719,6 +796,25 @@ function BlueprintCalculator({
     blueprintTypeId: number | null; blueprintName: string | null; hasBlueprint: boolean
   }> | null>(null)
   const [savedFits, setSavedFits] = useState<Array<{ id: string; name: string; fitText: string }>>([])
+  const [selectedFits, setSelectedFits] = useState<Array<{ id?: string; name: string; fitText: string }>>([])
+  const [fitPickerQuery, setFitPickerQuery] = useState('')
+  const [fitPickerOpen, setFitPickerOpen] = useState(false)
+  const fitPickerRef = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    const handler = (e: MouseEvent) => {
+      if (fitPickerRef.current && !fitPickerRef.current.contains(e.target as Node)) {
+        setFitPickerOpen(false)
+      }
+    }
+    document.addEventListener('mousedown', handler)
+    return () => document.removeEventListener('mousedown', handler)
+  }, [])
+
+  const filteredSavedFits = savedFits.filter(f =>
+    !selectedFits.some(s => s.id === f.id) &&
+    (!fitPickerQuery || f.name.toLowerCase().includes(fitPickerQuery.toLowerCase()))
+  )
 
   // Fit Build Plan mode
   interface FitPlanItem {
@@ -737,6 +833,8 @@ function BlueprintCalculator({
   const [fitPlanMode, setFitPlanMode] = useState(false)
   const [fitPlanLoading, setFitPlanLoading] = useState(false)
   const [fitPlanQty, setFitPlanQty] = useState(1)
+  const [allStepsLoading, setAllStepsLoading] = useState(false)
+  const fitPlanAllStepsActive = useRef(false)
 
   const refetchItem = useCallback(async (i: number, item: FitPlanItem) => {
     setFitPlanItems(prev => prev.map((p, j) => j === i ? { ...p, loading: true } : p))
@@ -761,23 +859,49 @@ function BlueprintCalculator({
   useEffect(() => {
     if (showFitImport) {
       fetch('/api/fits').then(r => r.json()).then(setSavedFits).catch(() => {})
+      setSelectedFits([])
+      setFitImportText('')
+      setFitImportResults(null)
+      setFitImportError(null)
+      setFitPickerQuery('')
     }
   }, [showFitImport])
 
   async function resolveFit() {
-    if (!fitImportText.trim()) return
+    const texts = [
+      ...selectedFits.map(f => f.fitText),
+      ...(fitImportText.trim() ? [fitImportText.trim()] : []),
+    ]
+    if (texts.length === 0) return
     setFitImportLoading(true)
     setFitImportError(null)
     setFitImportResults(null)
     try {
-      const r = await fetch('/api/industry/fit-blueprints', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ fitText: fitImportText }),
-      })
-      const data = await r.json()
-      if (!r.ok) throw new Error(data.error ?? 'Failed to resolve fit')
-      setFitImportResults(data.items)
+      const results = await Promise.all(texts.map(async fitText => {
+        const r = await fetch('/api/industry/fit-blueprints', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ fitText }),
+        })
+        const data = await r.json()
+        if (!r.ok) throw new Error(data.error ?? 'Failed to resolve fit')
+        return data.items as Array<{
+          name: string; qty: number; itemTypeId: number | null
+          blueprintTypeId: number | null; blueprintName: string | null; hasBlueprint: boolean
+        }>
+      }))
+
+      // Merge by blueprintTypeId (or name if no blueprint), summing qty
+      const merged = new Map<string, typeof results[0][0]>()
+      for (const items of results) {
+        for (const item of items) {
+          const key = item.blueprintTypeId ? String(item.blueprintTypeId) : item.name
+          const ex = merged.get(key)
+          if (ex) ex.qty += item.qty
+          else merged.set(key, { ...item })
+        }
+      }
+      setFitImportResults([...merged.values()])
     } catch (e) {
       setFitImportError(e instanceof Error ? e.message : 'Unknown error')
     } finally {
@@ -944,8 +1068,56 @@ function BlueprintCalculator({
 
   // Auto-fetch chain when popout opens or when blueprint/reaction mode changes
   useEffect(() => {
+    if (fitPlanAllStepsActive.current) return  // merged chain already set — skip
     if (showStepsPopout && activeBlueprint) fetchChain()
   }, [showStepsPopout, activeBlueprint?.typeId, reactionEnabled]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  const openFitPlanAllSteps = async () => {
+    if (fitPlanItems.length === 0) return
+    setAllStepsLoading(true)
+    setChainError(null)
+    try {
+      const results = await Promise.all(fitPlanItems.map(async item => {
+        const params = new URLSearchParams({
+          typeId: String(item.blueprint.typeId),
+          me: String(item.me),
+          runs: String(item.blueprint.runs * fitPlanQty),
+          includeReactions: String(reactionEnabled),
+          ...(characterId ? { characterId: String(characterId) } : {}),
+        })
+        const res = await fetch(`/api/industry/blueprint/chain?${params}`)
+        if (!res.ok) return null
+        return await res.json() as ChainData
+      }))
+
+      const buyMap = new Map<number, BuyItem>()
+      const mergedChain: ChainNode[] = []
+      for (const cd of results) {
+        if (!cd) continue
+        mergedChain.push(...cd.chain)
+        for (const b of cd.buyList) {
+          const ex = buyMap.get(b.typeId)
+          if (ex) { ex.qty += b.qty; ex.have = Math.max(ex.have, b.have) }
+          else buyMap.set(b.typeId, { ...b })
+        }
+      }
+
+      fitPlanAllStepsActive.current = true
+      setChainData({
+        productName: 'Full Fit Plan',
+        productTypeId: null,
+        productQty: fitPlanItems.reduce((s, i) => s + i.blueprint.runs * fitPlanQty, 0),
+        runs: fitPlanItems.length,
+        chain: mergedChain,
+        buyList: [...buyMap.values()].sort((a, b) => b.qty - a.qty),
+      })
+      setShowStepsPopout(true)
+    } catch (err) {
+      setChainError(err instanceof Error ? err.message : 'Chain fetch failed')
+    } finally {
+      setAllStepsLoading(false)
+    }
+  }
 
   // Search logic
   const runSearch = useCallback(async (q: string) => {
@@ -1160,6 +1332,19 @@ function BlueprintCalculator({
                   className="eve-input w-14 text-center text-[11px] py-0.5 px-1"
                 />
               </div>
+              {detailedSteps && (
+                <button
+                  onClick={openFitPlanAllSteps}
+                  disabled={allStepsLoading || fitPlanLoading || fitPlanItems.length === 0}
+                  className="flex items-center gap-1 text-[10px] uppercase tracking-wider text-eve-green border border-eve-green/40 px-2 py-0.5 hover:bg-eve-green/10 transition-colors disabled:opacity-40 shrink-0"
+                  title="View combined build chain for entire fit"
+                >
+                  {allStepsLoading
+                    ? <span className="w-2 h-2 rounded-full bg-eve-green animate-pulse" />
+                    : <FlaskConical size={10} />}
+                  All Steps
+                </button>
+              )}
               <button onClick={() => setFitPlanMode(false)} className="text-[10px] text-eve-muted hover:text-eve-text uppercase tracking-wider shrink-0">← Back</button>
             </div>
 
@@ -1182,6 +1367,18 @@ function BlueprintCalculator({
                         <span className="flex-1 text-[11px] text-eve-text truncate">{item.data?.productName ?? item.blueprint.typeName.replace(' Blueprint', '')}</span>
                         <span className="text-[10px] text-eve-dim shrink-0">×{item.blueprint.runs * fitPlanQty}</span>
                         {item.loading && <span className="w-1.5 h-1.5 rounded-full bg-eve-cyan animate-pulse shrink-0" />}
+                        {detailedSteps && (
+                          <button
+                            className="shrink-0 text-[9px] uppercase tracking-wider text-eve-green border border-eve-green/40 px-1.5 py-0.5 hover:bg-eve-green/10 transition-colors"
+                            onClick={e => {
+                              e.stopPropagation()
+                              setActiveBlueprint({ ...item.blueprint, me: item.me, te: item.te })
+                              setMe(item.me); setTe(item.te); setRuns(item.blueprint.runs)
+                              setShowStepsPopout(true)
+                            }}
+                            title="View detailed build chain"
+                          >Steps</button>
+                        )}
                         <button
                           className="shrink-0 text-[9px] uppercase tracking-wider text-eve-cyan border border-eve-cyan/40 px-1.5 py-0.5 hover:bg-eve-cyan/10 transition-colors"
                           onClick={e => { e.stopPropagation(); setActiveBlueprint({ ...item.blueprint, me: item.me, te: item.te }); setMe(item.me); setTe(item.te); setRuns(item.blueprint.runs); setStructure(item.structure); setRig(item.rig); setSecurity(item.security); setFitPlanMode(false) }}
@@ -1899,38 +2096,85 @@ function BlueprintCalculator({
               </div>
 
               <div className="flex flex-col gap-3 p-4 overflow-y-auto">
-                {/* Saved fits dropdown */}
+
+                {/* Selected fit chips */}
+                {selectedFits.length > 0 && (
+                  <div className="flex flex-col gap-1">
+                    {selectedFits.map((fit, i) => (
+                      <div key={i} className="flex items-center gap-2 px-2 py-1 bg-eve-cyan/5 border border-eve-cyan/20">
+                        <span className="flex-1 text-xs text-eve-text truncate">{fit.name}</span>
+                        <button
+                          onClick={() => { setSelectedFits(prev => prev.filter((_, j) => j !== i)); setFitImportResults(null) }}
+                          className="text-eve-dim hover:text-eve-red transition-colors shrink-0"
+                          title="Remove"
+                        >
+                          <X size={10} />
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {/* Saved fits searchable picker */}
                 {savedFits.length > 0 && (
-                  <div className="flex gap-2 items-center">
-                    <span className="text-[10px] text-eve-muted uppercase tracking-wider shrink-0">Saved fit:</span>
-                    <select
-                      className="flex-1 bg-black/30 border border-eve-border text-xs text-eve-text px-2 py-1 outline-none"
-                      onChange={e => {
-                        const fit = savedFits.find(f => f.id === e.target.value)
-                        if (fit) { setFitImportText(fit.fitText); setFitImportResults(null) }
-                      }}
-                      defaultValue=""
-                    >
-                      <option value="" disabled>Select a saved fit…</option>
-                      {savedFits.map(f => <option key={f.id} value={f.id}>{f.name}</option>)}
-                    </select>
+                  <div className="relative" ref={fitPickerRef}>
+                    <div className="relative">
+                      <input
+                        className="eve-input w-full text-xs pr-6"
+                        placeholder={selectedFits.length > 0 ? `Add another saved fit…` : `Search ${savedFits.length} saved fits…`}
+                        value={fitPickerQuery}
+                        onChange={e => { setFitPickerQuery(e.target.value); setFitPickerOpen(true) }}
+                        onFocus={() => { setFitPickerOpen(true) }}
+                        spellCheck={false}
+                      />
+                      <ChevronDown size={11} className="absolute right-2 top-1/2 -translate-y-1/2 text-eve-dim pointer-events-none" />
+                    </div>
+                    {fitPickerOpen && (
+                      <div className="absolute z-50 w-full mt-0.5 bg-eve-panel border border-eve-border max-h-48 overflow-y-auto">
+                        {filteredSavedFits.length === 0 ? (
+                          <div className="px-2 py-2 text-eve-dim text-xs">{fitPickerQuery ? 'No fits match' : 'All fits already added'}</div>
+                        ) : filteredSavedFits.map(fit => (
+                          <div
+                            key={fit.id}
+                            className="px-2 py-1.5 hover:bg-eve-border/30 cursor-pointer text-xs text-eve-text truncate"
+                            onMouseDown={() => {
+                              setSelectedFits(prev => [...prev, { id: fit.id, name: fit.name, fitText: fit.fitText }])
+                              setFitPickerQuery('')
+                              setFitPickerOpen(false)
+                              setFitImportResults(null)
+                            }}
+                          >
+                            {fit.name}
+                          </div>
+                        ))}
+                      </div>
+                    )}
                   </div>
                 )}
 
                 {/* EFT paste area */}
-                <textarea
-                  className="w-full h-32 bg-black/30 border border-eve-border text-[11px] text-eve-text font-mono px-2 py-1.5 outline-none resize-none placeholder:text-eve-dim"
-                  placeholder="Paste EFT fit here…"
-                  value={fitImportText}
-                  onChange={e => { setFitImportText(e.target.value); setFitImportResults(null) }}
-                />
+                <div className="flex flex-col gap-1">
+                  {selectedFits.length > 0 && (
+                    <span className="text-[10px] text-eve-dim uppercase tracking-wider">Or paste additional EFT text:</span>
+                  )}
+                  <textarea
+                    className="w-full h-32 bg-black/30 border border-eve-border text-[11px] text-eve-text font-mono px-2 py-1.5 outline-none resize-none placeholder:text-eve-dim"
+                    placeholder="Paste EFT fit here…"
+                    value={fitImportText}
+                    onChange={e => { setFitImportText(e.target.value); setFitImportResults(null) }}
+                  />
+                </div>
 
                 <button
                   onClick={resolveFit}
-                  disabled={!fitImportText.trim() || fitImportLoading}
+                  disabled={selectedFits.length === 0 && !fitImportText.trim() || fitImportLoading}
                   className="eve-btn-primary text-[10px] uppercase tracking-wider py-1.5 disabled:opacity-40"
                 >
-                  {fitImportLoading ? 'Resolving…' : 'Resolve Blueprints'}
+                  {fitImportLoading
+                    ? 'Resolving…'
+                    : selectedFits.length > 1
+                      ? `Resolve ${selectedFits.length} Fits`
+                      : 'Resolve Blueprints'}
                 </button>
 
                 {fitImportError && (
@@ -1990,11 +2234,11 @@ function BlueprintCalculator({
 
       {/* ── Steps Popout (portal-like fixed overlay) ─────────────── */}
       <AnimatePresence>
-        {showStepsPopout && activeBlueprint && (
+        {showStepsPopout && (activeBlueprint || fitPlanAllStepsActive.current) && (
           <StepsPopout
-            blueprint={activeBlueprint}
+            blueprint={activeBlueprint ?? { typeId: 0, typeName: 'Full Fit Plan', me: 0, te: 0, runs: fitPlanItems.length }}
             chainData={chainData}
-            chainLoading={chainLoading}
+            chainLoading={chainLoading || allStepsLoading}
             chainError={chainError}
             mfgStructure={structure}
             mfgRig={rig}
@@ -2002,7 +2246,7 @@ function BlueprintCalculator({
             rxRig={reactionRig}
             security={security}
             system={system}
-            onClose={() => setShowStepsPopout(false)}
+            onClose={() => { setShowStepsPopout(false); fitPlanAllStepsActive.current = false }}
           />
         )}
       </AnimatePresence>
@@ -2012,13 +2256,33 @@ function BlueprintCalculator({
 
 export default function IndustryPanel({ jobs, loading, onRefresh, freightImport, onFreightImportClear, blueprintImport, onBlueprintImportClear, characterId, accessToken, skills, assets, allIndustryJobs, characters }: IndustryPanelProps) {
   const [tab, setTab] = useState<'jobs' | 'freight' | 'blueprint'>('jobs')
-  const activeJobs = jobs.filter(j => j.status === 'active')
-  const readyJobs = jobs.filter(j => j.status === 'ready')
+  const [collapsedChars, setCollapsedChars]  = useState<Record<number, boolean>>({})
+  const [collapsedTypes, setCollapsedTypes]  = useState<Record<string, boolean>>({})
+  const toggleChar = (id: number) => setCollapsedChars(p => ({ ...p, [id]: !p[id] }))
+  const toggleType = (key: string) => setCollapsedTypes(p => ({ ...p, [key]: !p[key] }))
+  const now = Date.now()
+  const readyJobs = jobs.filter(j =>
+    j.status === 'ready' || (j.status === 'active' && new Date(j.endDate).getTime() <= now)
+  )
+  const activeJobs = jobs.filter(j =>
+    j.status === 'active' && new Date(j.endDate).getTime() > now
+  )
 
-  const byActivity = jobs.reduce<Record<string, number>>((acc, j) => {
-    acc[j.activityName] = (acc[j.activityName] || 0) + 1
-    return acc
-  }, {})
+  const charJobGroups = useMemo(() => {
+    if (!allIndustryJobs || !characters) return null
+    return characters
+      .filter(c => allIndustryJobs[c.characterId]?.length)
+      .map(c => {
+        const charJobs = [...(allIndustryJobs[c.characterId] ?? [])]
+          .sort((a, b) => new Date(a.endDate).getTime() - new Date(b.endDate).getTime())
+        const byType: Record<string, EveIndustryJob[]> = {}
+        for (const job of charJobs) {
+          if (!byType[job.activityName]) byType[job.activityName] = []
+          byType[job.activityName].push(job)
+        }
+        return { character: c, byType, total: charJobs.length }
+      })
+  }, [allIndustryJobs, characters])
 
   // Auto-switch when imports arrive
   useEffect(() => { if (freightImport) setTab('freight') }, [freightImport])
@@ -2083,99 +2347,102 @@ export default function IndustryPanel({ jobs, loading, onRefresh, freightImport,
             ))}
           </div>
 
-          {/* Activity breakdown */}
-          {Object.keys(byActivity).length > 0 && (
-            <div className="eve-panel p-3 flex-shrink-0">
-              <div className="eve-header">ACTIVITY BREAKDOWN</div>
-              <div className="space-y-1">
-                {Object.entries(byActivity).map(([name, count]) => (
-                  <div key={name} className="flex justify-between items-center">
-                    <span className={`text-xs ${ACTIVITY_COLORS[name] || 'text-eve-muted'}`}>{name}</span>
-                    <span className="text-eve-muted text-xs">{count} job{count !== 1 ? 's' : ''}</span>
-                  </div>
-                ))}
-              </div>
+          {/* Jobs grouped by character → activity type */}
+          {jobs.length === 0 ? (
+            <div className="eve-panel p-3 flex items-center justify-center text-eve-muted text-xs py-6">
+              NO ACTIVE INDUSTRY JOBS
             </div>
-          )}
-
-          {/* Job list */}
-          <div className="eve-panel p-3 flex flex-col">
-            <div className="eve-header flex items-center gap-2">
-              <Factory size={11} /> ACTIVE JOBS
-            </div>
-            {jobs.length === 0 ? (
-              <div className="flex items-center justify-center text-eve-muted text-xs py-6">
-                NO ACTIVE INDUSTRY JOBS
-              </div>
-            ) : (() => {
-              const multiChar = allIndustryJobs && characters && Object.keys(allIndustryJobs).length > 1
-              if (multiChar) {
+          ) : charJobGroups && charJobGroups.length > 0 ? (
+            <div className="space-y-2">
+              {charJobGroups.map(({ character, byType, total }) => {
+                const charCollapsed = !!collapsedChars[character.characterId]
                 return (
-                  <div className="space-y-4">
-                    {characters!
-                      .filter(c => allIndustryJobs![c.characterId]?.length)
-                      .map(c => {
-                        const charJobs = [...(allIndustryJobs![c.characterId] ?? [])]
-                          .sort((a, b) => new Date(a.endDate).getTime() - new Date(b.endDate).getTime())
-                        return (
-                          <div key={c.characterId}>
-                            <div className="flex items-center gap-2 mb-2">
-                              <div className="text-[9px] uppercase tracking-widest text-eve-cyan/70 font-mono">{c.characterName}</div>
-                              <div className="flex-1 h-px bg-eve-cyan/20" />
-                              <div className="text-[9px] text-eve-muted">{charJobs.length} job{charJobs.length !== 1 ? 's' : ''}</div>
-                            </div>
-                            <div className="space-y-2">
-                              {charJobs.map(job => (
-                                <div key={job.jobId} className="border border-eve-border/50 p-2 relative">
-                                  <div className="absolute top-0 left-0 w-2 h-2 border-t border-l border-eve-cyan/30" />
-                                  <div className="flex items-start justify-between gap-2">
-                                    <div className="flex-1 min-w-0">
-                                      <div className="text-eve-text text-xs truncate">{job.blueprintTypeName}</div>
-                                      <div className="flex items-center gap-2 mt-0.5">
-                                        <span className={`text-[10px] ${ACTIVITY_COLORS[job.activityName] || 'text-eve-muted'}`}>{job.activityName}</span>
-                                        <span className="text-eve-dim text-[10px]">×{job.runs}</span>
+                  <div key={character.characterId} className="eve-panel">
+                    {/* Character header — clickable */}
+                    <button
+                      onClick={() => toggleChar(character.characterId)}
+                      className="w-full flex items-center gap-2 px-3 py-2 hover:bg-eve-border/10 transition-colors"
+                    >
+                      {charCollapsed
+                        ? <ChevronRightIcon size={9} className="text-eve-dim shrink-0" />
+                        : <ChevronDown size={9} className="text-eve-dim shrink-0" />}
+                      <img
+                        src={`https://images.evetech.net/characters/${character.characterId}/portrait?size=32`}
+                        className="w-4 h-4 rounded-full opacity-80 shrink-0"
+                        alt=""
+                      />
+                      <span className="text-eve-cyan text-[10px] uppercase tracking-widest font-mono flex-1 text-left">{character.characterName}</span>
+                      <span className="text-[9px] text-eve-muted shrink-0">{total} job{total !== 1 ? 's' : ''}</span>
+                    </button>
+
+                    {/* Activity type groups */}
+                    {!charCollapsed && (
+                      <div className="px-3 pb-2 space-y-1.5">
+                        {Object.entries(byType).map(([activity, actJobs]) => {
+                          const typeKey = `${character.characterId}:${activity}`
+                          const typeCollapsed = !!collapsedTypes[typeKey]
+                          return (
+                            <div key={activity}>
+                              <button
+                                onClick={() => toggleType(typeKey)}
+                                className="w-full flex items-center gap-2 py-1 hover:opacity-80 transition-opacity"
+                              >
+                                {typeCollapsed
+                                  ? <ChevronRightIcon size={8} className="text-eve-dim shrink-0" />
+                                  : <ChevronDown size={8} className="text-eve-dim shrink-0" />}
+                                <span className={`text-[9px] uppercase tracking-wider font-mono ${ACTIVITY_COLORS[activity] || 'text-eve-muted'}`}>{activity}</span>
+                                <div className="flex-1 h-px bg-eve-border/30" />
+                                <span className="text-[9px] text-eve-dim shrink-0">{actJobs.length}</span>
+                              </button>
+                              {!typeCollapsed && (
+                                <div className="space-y-px pl-3">
+                                  {actJobs.map(job => (
+                                    <div key={job.jobId} className="border-l border-eve-border/40 pl-2 py-1">
+                                      <div className="flex items-center gap-2">
+                                        <span className="flex-1 text-[11px] text-eve-text truncate">{job.blueprintTypeName}</span>
+                                        <span className="text-[9px] text-eve-dim shrink-0">×{job.runs}</span>
+                                        <span className={`text-[9px] border px-1 py-px uppercase shrink-0 ${STATUS_COLORS[job.status] || 'text-eve-muted border-eve-dim'}`}>
+                                          {job.status}
+                                        </span>
                                       </div>
+                                      {job.status === 'active' && <JobProgress job={job} />}
                                     </div>
-                                    <span className={`text-[10px] border px-1.5 py-0.5 uppercase ${STATUS_COLORS[job.status] || 'text-eve-muted border-eve-dim'}`}>
-                                      {job.status}
-                                    </span>
-                                  </div>
-                                  {job.status === 'active' && <JobProgress job={job} />}
+                                  ))}
                                 </div>
-                              ))}
+                              )}
                             </div>
-                          </div>
-                        )
-                      })}
+                          )
+                        })}
+                      </div>
+                    )}
                   </div>
                 )
-              }
-              return (
-                <div className="space-y-3">
-                  {[...jobs]
-                    .sort((a, b) => new Date(a.endDate).getTime() - new Date(b.endDate).getTime())
-                    .map(job => (
-                      <div key={job.jobId} className="border border-eve-border/50 p-2 relative">
-                        <div className="absolute top-0 left-0 w-2 h-2 border-t border-l border-eve-cyan/30" />
-                        <div className="flex items-start justify-between gap-2">
-                          <div className="flex-1 min-w-0">
-                            <div className="text-eve-text text-xs truncate">{job.blueprintTypeName}</div>
-                            <div className="flex items-center gap-2 mt-0.5">
-                              <span className={`text-[10px] ${ACTIVITY_COLORS[job.activityName] || 'text-eve-muted'}`}>{job.activityName}</span>
-                              <span className="text-eve-dim text-[10px]">×{job.runs}</span>
-                            </div>
-                          </div>
-                          <span className={`text-[10px] border px-1.5 py-0.5 uppercase ${STATUS_COLORS[job.status] || 'text-eve-muted border-eve-dim'}`}>
-                            {job.status}
-                          </span>
+              })}
+            </div>
+          ) : (
+            <div className="space-y-2">
+              {[...jobs]
+                .sort((a, b) => new Date(a.endDate).getTime() - new Date(b.endDate).getTime())
+                .map(job => (
+                  <div key={job.jobId} className="border border-eve-border/50 p-2 relative">
+                    <div className="absolute top-0 left-0 w-2 h-2 border-t border-l border-eve-cyan/30" />
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="flex-1 min-w-0">
+                        <div className="text-eve-text text-xs truncate">{job.blueprintTypeName}</div>
+                        <div className="flex items-center gap-2 mt-0.5">
+                          <span className={`text-[10px] ${ACTIVITY_COLORS[job.activityName] || 'text-eve-muted'}`}>{job.activityName}</span>
+                          <span className="text-eve-dim text-[10px]">×{job.runs}</span>
                         </div>
-                        {job.status === 'active' && <JobProgress job={job} />}
                       </div>
-                    ))}
-                </div>
-              )
-            })()}
-          </div>
+                      <span className={`text-[10px] border px-1.5 py-0.5 uppercase ${STATUS_COLORS[job.status] || 'text-eve-muted border-eve-dim'}`}>
+                        {job.status}
+                      </span>
+                    </div>
+                    {job.status === 'active' && <JobProgress job={job} />}
+                  </div>
+                ))}
+            </div>
+          )}
         </>
       ) : tab === 'freight' ? (
         <FreightCalculator

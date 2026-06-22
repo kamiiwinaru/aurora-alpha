@@ -1,5 +1,26 @@
 # Changelog
 
+## [1.0.9] — 2026-06-22
+
+### Added
+- **Pilot profile window** — clicking a hostile pilot name in the Intel panel now opens a profile card showing their security status, corporation, alliance, and zKillboard stats (kills, losses, ISK destroyed/lost, efficiency). Opens inline instead of navigating away to zkill.
+- **In-app patch notes** — clicking the version number in the header opens a changelog viewer. Also auto-opens once after each update so you never miss what changed.
+- **Reminders** — bell icon added to the Aurora sidebar (mirroring the Todo notepad). Set timed reminders with natural language ("in 2h check market"), countdown display, and a toast alert when they fire. Aurora can set reminders via the `set_reminder` tool.
+- **Assets panel valuation** — ESI adjusted prices are fetched on load and the total estimated ISK value of all assets is displayed. An "Appraise All" button sends the full asset list directly to the Janice panel.
+- **PVE mission database** — the PVE panel now includes a mission lookup tab. Search by mission name to see damage types dealt/resisted, NPC breakdown per pocket (type, class, ewar, webs, points), blitz notes, and faction damage fallbacks for missions without explicit wiki data.
+- **Intel gang-size tiering** — voice alert phrases now scale with the number of hostiles reported. Solo contacts get brief warnings; small gangs (2–4), spikes (5–10), and fleets (11+) each get progressively more urgent language.
+- **Intel "all clear" range check** — clear alerts now only fire if the system being cleared is within your configured alert jump threshold, matching the same range logic as hostile alerts.
+- **Janice preload from Assets** — the "Appraise All" button in Assets sends a pre-built item list to Janice and triggers an immediate appraisal without any copy-paste.
+- **Janice URL copy** — appraisal link now displays inline with a copy button instead of opening a new tab automatically.
+
+### Changed
+- Intel hostile names in chat log are now clickable — opens the pilot profile window instead of jumping to zKillboard.
+- Intel highlight parser no longer mistakes all-caps tokens (system codes like `G-7WUF`, corp tickers) for parts of character names.
+- Intel voice alerts broken into fleet/spike/small/solo tiers with distinct phrase pools per tier.
+- Escape key to exit fullscreen now uses a window-local input event instead of a global shortcut — no longer steals Escape from other applications while Aurora is in the background.
+- Recent character profiles fetched in Intel are passed to Aurora's context so she can reference pilot stats in conversation.
+- Dev server retry timeout increased (20 → 60 retries, 750ms interval) to better handle slow cold starts.
+
 ## [1.0.8] — 2026-06-16
 
 ### Added

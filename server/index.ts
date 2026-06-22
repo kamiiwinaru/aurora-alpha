@@ -748,6 +748,40 @@ app.delete('/api/todos/:id', (req, res) => {
   return res.json({ ok: true })
 })
 
+// ── Reminders storage ────────────────────────────────────────────────────
+interface Reminder { id: string; text: string; fireAt: string; fired: boolean; createdAt: string }
+const REMINDER_FILE = join(process.cwd(), 'reminders.json')
+function loadReminders(): Reminder[] {
+  try { return existsSync(REMINDER_FILE) ? JSON.parse(readFileSync(REMINDER_FILE, 'utf8')) : [] } catch { return [] }
+}
+function saveReminders(r: Reminder[]) { writeFileSync(REMINDER_FILE, JSON.stringify(r, null, 2), 'utf8') }
+
+app.get('/api/reminders', (_req, res) => res.json(loadReminders()))
+
+app.post('/api/reminders', (req, res) => {
+  const { text, fireAt } = req.body as { text: string; fireAt: string }
+  if (!text?.trim() || !fireAt) return res.status(400).json({ error: 'text and fireAt required' })
+  const reminders = loadReminders()
+  const item: Reminder = { id: crypto.randomUUID(), text: text.trim(), fireAt, fired: false, createdAt: new Date().toISOString() }
+  reminders.push(item)
+  saveReminders(reminders)
+  return res.json(item)
+})
+
+app.patch('/api/reminders/:id', (req, res) => {
+  const reminders = loadReminders()
+  const idx = reminders.findIndex(r => r.id === req.params.id)
+  if (idx === -1) return res.status(404).json({ error: 'not found' })
+  reminders[idx] = { ...reminders[idx], ...req.body as Partial<Reminder> }
+  saveReminders(reminders)
+  return res.json(reminders[idx])
+})
+
+app.delete('/api/reminders/:id', (req, res) => {
+  saveReminders(loadReminders().filter(r => r.id !== req.params.id))
+  return res.json({ ok: true })
+})
+
 // ── Roadmap storage ───────────────────────────────────────────────────────
 type RoadmapStatus = 'planned' | 'consideration' | 'in-progress' | 'done'
 type RoadmapCategory = 'Bug Fixes' | 'Auth & Accounts' | 'Intel Tool' | 'Aurora AI' | 'EVE Data' | 'Infrastructure' | 'General'
@@ -831,6 +865,44 @@ let _mapSystems: MapSystem[] = []
 let _mapSysById = new Map<number, MapSystem>()
 let _mapSysByName = new Map<string, MapSystem>()
 let _mapLyPerUnit = 0
+
+// ── Mission DB ────────────────────────────────────────────────────────────────
+
+interface MissionNPC { group: string; class: string; count: number; name: string; trigger: string | null; web: boolean; point: boolean; ewar: string | null; notes: string | null }
+interface MissionPocket { name: string; description: string; npcs: MissionNPC[] }
+interface MissionExtra { type: string; note: string }
+interface MissionEntry {
+  id: string; name: string; wikiTitle: string; level: number | null; type: string | null
+  objective: string | null; factions: string[]; standingLoss: string | null
+  damageDeal: string | null; damageResist: string | null; shipSuggestion: string[]
+  extras: MissionExtra[]; briefing: string | null; pockets: MissionPocket[]; blitz: string | null
+}
+
+let _missions: MissionEntry[] = []
+
+function ensureMissionsLoaded() {
+  if (_missions.length > 0) return
+  try {
+    const raw = JSON.parse(readFileSync(join(process.cwd(), 'public', 'missions.json'), 'utf8'))
+    _missions = raw.missions ?? []
+  } catch { /* missions.json not built yet */ }
+}
+
+function searchMissions(query: string, level?: number | null): MissionEntry[] {
+  ensureMissionsLoaded()
+  const q = query.toLowerCase().trim()
+  return _missions.filter(m => {
+    if (level != null && m.level !== level) return false
+    return m.name.toLowerCase().includes(q) ||
+      m.factions.some(f => f.toLowerCase().includes(q)) ||
+      (m.type?.toLowerCase().includes(q) ?? false)
+  })
+}
+
+ensureMissionsLoaded()
+if (_missions.length > 0) console.log(`Mission DB loaded: ${_missions.length} missions`)
+
+// ─────────────────────────────────────────────────────────────────────────────
 
 function ensureMapLoaded() {
   if (_mapSystems.length > 0) return
@@ -1063,6 +1135,17 @@ const SPOTIFY_TOOLS: Anthropic.Tool[] = [
     input_schema: { type: 'object' as const, properties: {}, required: [] },
   },
   {
+    name: 'spotify_shuffle',
+    description: 'Toggle or set Spotify shuffle mode. Use when the user says "shuffle", "turn on shuffle", "turn off shuffle", "randomize", or "stop shuffling".',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        enabled: { type: 'boolean', description: 'true to enable shuffle, false to disable. If omitted, toggles the current state.' },
+      },
+      required: [],
+    },
+  },
+  {
     name: 'spotify_add_to_playlist',
     description: 'Add the currently playing track (or a searched track) to an existing playlist, or create a new playlist. Use when the user says "add this to my playlist", "save this to X playlist", "create a playlist called X", or similar.',
     input_schema: {
@@ -1218,6 +1301,18 @@ const MARKET_TOOLS: Anthropic.Tool[] = [
     },
   },
   {
+    name: 'query_missions',
+    description: 'Look up EVE Online mission details from the local mission database (sourced from EVE University wiki). Use whenever the pilot asks about a mission by name — damage types to deal/resist, EWAR threats, ship suggestions, wave composition, NPC triggers, blitz strategy, or standing loss. Also useful for "what missions does faction X have?" or "show me level 4 Guristas missions". Returns full structured details for matching missions.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        query: { type: 'string', description: 'Mission name (partial match OK), faction name, or keyword to search for' },
+        level: { type: 'number', description: 'Filter by mission level 1-5 (optional)' },
+      },
+      required: ['query'],
+    },
+  },
+  {
     name: 'plan_route',
     description: 'Calculate the optimal route between two EVE Online solar systems. Use whenever the pilot asks to plan a route, get directions, or asks how to travel between systems. Always pass any known jump bridges so the route accounts for them. Returns the full hop list, jump count, route light-years, and direct jump distance.',
     input_schema: {
@@ -1238,6 +1333,17 @@ const MARKET_TOOLS: Anthropic.Tool[] = [
         },
       },
       required: ['origin', 'destination'],
+    },
+  },
+  {
+    name: 'lookup_character',
+    description: 'Look up an EVE Online pilot by name. Returns their corporation, alliance, security status, member count, birthday, and recent kill/loss statistics from zKillboard. Use whenever the pilot asks who someone is, what corp or alliance a character is in, or wants intel on a specific pilot.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        name: { type: 'string', description: 'Character name to look up (exact or partial)' },
+      },
+      required: ['name'],
     },
   },
   {
@@ -1311,6 +1417,18 @@ const MARKET_TOOLS: Anthropic.Tool[] = [
         ids: { type: 'array', items: { type: 'string' }, description: 'IDs of items to remove' },
       },
       required: ['ids'],
+    },
+  },
+  {
+    name: 'set_reminder',
+    description: 'Set a timed reminder for the pilot. Use this whenever the pilot asks to be reminded of something after a delay ("remind me in 2 hours to check the market", "set a reminder for 30 minutes"). Parse the delay from their message and store the reminder text.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        text:       { type: 'string', description: 'The reminder message to show the pilot when the time comes' },
+        delay_minutes: { type: 'number', description: 'How many minutes from now to fire the reminder' },
+      },
+      required: ['text', 'delay_minutes'],
     },
   },
   {
@@ -1685,6 +1803,15 @@ async function executeMarketTool(name: string, input: Record<string, unknown>, c
       return { ok: true, queued: `${track.artists[0]?.name} — ${track.name}` }
     }
 
+    if (name === 'spotify_shuffle') {
+      const player = await spotifyApi<any>(spotifyToken, '/me/player')
+      const current = player?.shuffle_state ?? false
+      const enabled = typeof input.enabled === 'boolean' ? input.enabled : !current
+      const qs = player?.device?.id ? `?state=${enabled}&device_id=${player.device.id}` : `?state=${enabled}`
+      await spotifyApi(spotifyToken, `/me/player/shuffle${qs}`, { method: 'PUT' })
+      return { ok: true, shuffle: enabled ? 'on' : 'off' }
+    }
+
     if (name === 'spotify_add_to_playlist') {
       const playlistName = String(input.playlist_name ?? '')
       const createNew    = Boolean(input.create_new)
@@ -1746,6 +1873,63 @@ async function executeMarketTool(name: string, input: Record<string, unknown>, c
 
     return { error: `Unknown Spotify tool: ${name}` }
   }
+  if (name === 'query_missions') {
+    ensureMissionsLoaded()
+    if (_missions.length === 0) return { error: 'Mission database not built. Run: node scripts/scrape-missions.js' }
+    const query = String(input.query ?? '').trim()
+    if (!query) return { error: 'query is required' }
+    const level = input.level != null ? Number(input.level) : null
+    const matches = searchMissions(query, level)
+    if (matches.length === 0) return { found: 0, missions: [], hint: `No missions found matching "${query}"${level ? ` at level ${level}` : ''}. Try a shorter name or faction name.` }
+    // Return full detail for up to 3 matches; summary list for more
+    if (matches.length <= 3) {
+      return {
+        found: matches.length,
+        missions: matches.map(m => ({
+          name: m.name,
+          level: m.level,
+          type: m.type,
+          factions: m.factions,
+          standingLoss: m.standingLoss,
+          damageDeal: m.damageDeal,
+          damageResist: m.damageResist,
+          shipSuggestion: m.shipSuggestion,
+          extras: m.extras,
+          objective: m.objective,
+          blitz: m.blitz,
+          pockets: m.pockets.map(p => ({
+            name: p.name,
+            description: p.description,
+            npcs: p.npcs.map(n => ({
+              group: n.group,
+              class: n.class,
+              count: n.count,
+              name: n.name,
+              web: n.web || undefined,
+              point: n.point || undefined,
+              ewar: n.ewar || undefined,
+              trigger: n.trigger || undefined,
+              notes: n.notes || undefined,
+            })),
+          })),
+        })),
+      }
+    }
+    // Many matches — return summary list only
+    return {
+      found: matches.length,
+      note: 'Multiple matches — showing summary. Narrow your search for full details.',
+      missions: matches.slice(0, 20).map(m => ({
+        name: m.name,
+        level: m.level,
+        factions: m.factions,
+        damageDeal: m.damageDeal,
+        damageResist: m.damageResist,
+        extras: m.extras.map(e => e.type),
+      })),
+    }
+  }
+
   if (name === 'plan_route') {
     ensureMapLoaded()
     if (_mapSystems.length === 0) return { error: 'Star map data not loaded — run `node scripts/build-map-data.mjs` first.' }
@@ -1815,6 +1999,26 @@ async function executeMarketTool(name: string, input: Record<string, unknown>, c
       route: hops,
     }
   }
+
+  if (name === 'lookup_character') {
+    const charName = String(input.name ?? '').trim()
+    if (!charName) return { error: 'name is required' }
+    try {
+      const p = await fetchCharProfileESI(charName)
+      return {
+        name: p.name,
+        securityStatus: p.securityStatus.toFixed(2),
+        birthday: p.birthday.slice(0, 10),
+        corporation: p.corporation ? `${p.corporation.name} [${p.corporation.ticker}] · ${p.corporation.memberCount.toLocaleString()} members` : 'Unknown',
+        alliance: p.alliance ? `${p.alliance.name} [${p.alliance.ticker}]` : null,
+        zkillUrl: `https://zkillboard.com/character/${p.id}/`,
+        note: 'Kill/loss stats available in the Intel panel profile window.',
+      }
+    } catch (err: any) {
+      return { error: err.message ?? 'Character lookup failed' }
+    }
+  }
+
 
   if (name === 'check_blueprint_profitability') {
     const blueprintInputs = (input.blueprints as { name: string; me?: number; runs?: number }[]) ?? []
@@ -2208,6 +2412,20 @@ async function executeMarketTool(name: string, input: Record<string, unknown>, c
     const filtered = todos.filter(t => !ids.includes(t.id))
     saveTodos(filtered)
     return { removed: todos.length - filtered.length }
+  }
+
+  if (name === 'set_reminder') {
+    const text = String(input.text ?? '').trim()
+    const delayMin = Number(input.delay_minutes ?? 0)
+    if (!text || delayMin <= 0) return { error: 'text and positive delay_minutes required' }
+    const fireAt = new Date(Date.now() + delayMin * 60_000).toISOString()
+    const reminders = loadReminders()
+    const item = { id: crypto.randomUUID(), text, fireAt, fired: false, createdAt: new Date().toISOString() }
+    reminders.push(item)
+    saveReminders(reminders)
+    const h = Math.floor(delayMin / 60), m = Math.round(delayMin % 60)
+    const eta = h > 0 ? `${h}h ${m}m` : `${m}m`
+    return { set: true, text, fireAt, eta }
   }
 
   if (name === 'get_mail') {
@@ -2798,6 +3016,15 @@ async function getAdjustedPrices(): Promise<Map<number, number>> {
     return _adjustedPriceCache ?? new Map()
   }
 }
+
+// ── Adjusted price map (for asset valuation) ─────────────────────────────
+// GET /api/markets/prices  → { prices: Record<typeId, adjustedPrice> }
+app.get('/api/markets/prices', async (_req, res) => {
+  const map = await getAdjustedPrices()
+  const prices: Record<number, number> = {}
+  for (const [id, price] of map) prices[id] = price
+  res.json({ prices })
+})
 
 // ── Jita price lookup for profitability calc ──────────────────────────────
 // POST /api/industry/jita-prices  { typeIds: number[] }
@@ -3527,6 +3754,91 @@ app.post('/api/eve/resolve-names', async (req, res) => {
     res.json(data)
   } catch (err) {
     res.status(500).json({ error: 'Name resolution failed' })
+  }
+})
+
+// ── Character profile cache (in-memory, 10 min TTL) ──────────────────────
+interface CharProfile {
+  id: number; name: string; securityStatus: number; birthday: string
+  corporation: { id: number; name: string; ticker: string; memberCount: number } | null
+  alliance: { id: number; name: string; ticker: string } | null
+  zkill: { kills: number; losses: number; iskDestroyed: number; iskLost: number }
+  fetchedAt: number
+}
+const _profileCache = new Map<string, CharProfile>() // keyed by lowercase name
+const PROFILE_TTL_MS = 10 * 60 * 1000
+
+// ESI-only lookup — fast, no zkill. Used by the Aurora AI tool.
+async function fetchCharProfileESI(name: string): Promise<CharProfile> {
+  const key = name.toLowerCase()
+  const cached = _profileCache.get(key)
+  if (cached && Date.now() - cached.fetchedAt < PROFILE_TTL_MS) return cached
+
+  const idsRes = await fetch('https://esi.evetech.net/latest/universe/ids/?datasource=tranquility', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify([name]),
+  })
+  if (!idsRes.ok) throw Object.assign(new Error('ESI name resolution failed'), { status: 502 })
+  const idsData = await idsRes.json() as { characters?: { id: number; name: string }[] }
+  const char = idsData.characters?.[0]
+  if (!char) throw Object.assign(new Error(`Character "${name}" not found`), { status: 404 })
+
+  const charRes = await fetch(`https://esi.evetech.net/latest/characters/${char.id}/?datasource=tranquility`)
+  if (!charRes.ok) throw Object.assign(new Error('ESI character fetch failed'), { status: 502 })
+  const charData = await charRes.json() as { corporation_id: number; alliance_id?: number; security_status: number; birthday: string }
+
+  const [corpRes, alliRes] = await Promise.all([
+    fetch(`https://esi.evetech.net/latest/corporations/${charData.corporation_id}/?datasource=tranquility`),
+    charData.alliance_id ? fetch(`https://esi.evetech.net/latest/alliances/${charData.alliance_id}/?datasource=tranquility`) : Promise.resolve(null),
+  ])
+  const corpData = corpRes.ok ? await corpRes.json() as { name: string; ticker: string; member_count: number } : null
+  const alliData = alliRes?.ok ? await alliRes.json() as { name: string; ticker: string } : null
+
+  const profile: CharProfile = {
+    id: char.id, name: char.name,
+    securityStatus: charData.security_status,
+    birthday: charData.birthday,
+    corporation: corpData ? { id: charData.corporation_id, name: corpData.name, ticker: corpData.ticker, memberCount: corpData.member_count } : null,
+    alliance: alliData && charData.alliance_id ? { id: charData.alliance_id, name: alliData.name, ticker: alliData.ticker } : null,
+    zkill: { kills: 0, losses: 0, iskDestroyed: 0, iskLost: 0 },
+    fetchedAt: Date.now(),
+  }
+  _profileCache.set(key, profile)
+  return profile
+}
+
+// Full lookup with zkill stats — used by the UI profile window.
+// zkill fetches are guarded with a 5s timeout so they never hang.
+async function fetchCharProfile(name: string): Promise<CharProfile> {
+  const profile = await fetchCharProfileESI(name)
+  if (profile.zkill.kills > 0 || profile.zkill.losses > 0) return profile // already has stats
+
+  try {
+    const timeout = (ms: number) => new Promise<never>((_, r) => setTimeout(() => r(new Error('timeout')), ms))
+    const [refs, lossRefs] = await Promise.all([
+      Promise.race([fetchZkillPage(`kills/characterID/${profile.id}/page/1/`), timeout(5000)]),
+      Promise.race([fetchZkillPage(`losses/characterID/${profile.id}/page/1/`), timeout(5000)]),
+    ])
+    profile.zkill = {
+      kills: refs.length,
+      losses: lossRefs.length,
+      iskDestroyed: refs.reduce((s, r) => s + (r.zkb?.totalValue ?? 0), 0),
+      iskLost: lossRefs.reduce((s, r) => s + (r.zkb?.totalValue ?? 0), 0),
+    }
+    _profileCache.set(name.toLowerCase(), profile)
+  } catch { /* zkill optional */ }
+
+  return profile
+}
+
+// ── Character / Corp profile lookup ──────────────────────────────────────
+app.get('/api/character/profile', async (req, res) => {
+  const name = (req.query.name as string)?.trim()
+  if (!name) return res.status(400).json({ error: 'name required' })
+  try {
+    const profile = await fetchCharProfile(name)
+    res.json(profile)
+  } catch (err: any) {
+    res.status(err.status ?? 500).json({ error: err.message ?? 'Profile lookup failed' })
   }
 })
 

@@ -4,6 +4,7 @@ import { Volume2, VolumeX } from 'lucide-react'
 
 import AURORA_IMG from '../assets/Aurora1.png'
 import TodoList from './TodoList'
+import ReminderList from './ReminderList'
 import { useVoiceInput } from '../hooks/useVoiceInput'
 
 function AuroraImage() {
@@ -181,6 +182,9 @@ export default function Aurora({ isSpeaking, characterName, voiceEnabled, onTogg
             {voiceEnabled ? <Volume2 size={13} /> : <VolumeX size={13} />}
           </motion.button>
         )}
+
+        {/* Reminders */}
+        <ReminderList />
 
         {/* Todo notepad */}
         <TodoList />

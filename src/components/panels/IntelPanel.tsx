@@ -6,6 +6,7 @@ import { SYSTEM_RE, renderMessage, buildSpans } from '../../lib/intel-highlight'
 import { EVE_SYSTEM_NAMES } from '../../lib/eve-system-names'
 import { EVE_SYSTEM_IDS } from '../../lib/eve-system-ids'
 import { EVE_SYSTEM_GRAPH } from '../../lib/eve-system-graph'
+import CharacterProfileWindow from '../CharacterProfileWindow'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -594,12 +595,19 @@ interface IntelPanelProps {
   characterId?: number | null
   characterName?: string | null
   onZkillLookup?: (query: string, category: 'character' | 'system') => void
+  onCharacterProfileFetched?: (profile: {
+    name: string; securityStatus: number; birthday: string
+    corporation: { name: string; ticker: string; memberCount: number } | null
+    alliance: { name: string; ticker: string } | null
+    zkill: { kills: number; losses: number; iskDestroyed: number; iskLost: number }
+  }) => void
 }
 
 const INTEL_MANUAL_SYSTEM_KEY = (id: number) => `aurora_intel_system_${id}`
 const INTEL_THRESHOLD_KEY     = (id: number) => `aurora_intel_threshold_${id}`
 
-export default function IntelPanel({ shipLocation, characterId, characterName, onZkillLookup }: IntelPanelProps) {
+export default function IntelPanel({ shipLocation, characterId, characterName, onZkillLookup, onCharacterProfileFetched }: IntelPanelProps) {
+  const [profileTarget, setProfileTarget] = useState<string | null>(null)
   const [channels, setChannels]           = useState<ChannelState[]>([])
   const [topZ, setTopZ]                   = useState(100)
   const [alertsEnabled, setAlertsEnabled] = useState(true)
@@ -707,13 +715,22 @@ export default function IntelPanel({ shipLocation, characterId, characterName, o
     }
     if (systemsInMsg.size === 0) return
 
-    // Clear reports — soft tone, no hostile urgency
+    // Clear reports — only announce if within alert threshold, same range check as hostile
     if (entry.category === 'clear') {
-      const sys = [...systemsInMsg][0]
-      const now = Date.now()
-      if (sys && (now - (recentAlertedSys.get(`clr-${sys.toLowerCase()}`) ?? 0)) < ALERT_COOLDOWN_MS) return
-      if (sys) recentAlertedSys.set(`clr-${sys.toLowerCase()}`, now)
-      await playAlert({ urgency: 'clear', system: sys })
+      for (const sysName of systemsInMsg) {
+        const inRange = !effectiveOriginIdRef.current || (() => {
+          const destId = resolveSystemId(sysName)
+          if (!destId) return false
+          const jumps = jumpsBetween(effectiveOriginIdRef.current!, destId)
+          return jumps !== null && jumps <= alertThresholdRef.current
+        })()
+        if (!inRange) continue
+        const now = Date.now()
+        if ((now - (recentAlertedSys.get(`clr-${sysName.toLowerCase()}`) ?? 0)) < ALERT_COOLDOWN_MS) return
+        recentAlertedSys.set(`clr-${sysName.toLowerCase()}`, now)
+        await playAlert({ urgency: 'clear', system: sysName })
+        return
+      }
       return
     }
 
@@ -975,7 +992,7 @@ export default function IntelPanel({ shipLocation, characterId, characterName, o
                   originSystemId={effectiveOriginId}
                   alertThreshold={alertThreshold}
                   alertsEnabled={alertsEnabled}
-                  onZkillLookup={onZkillLookup}
+                  onZkillLookup={(q, cat) => cat === 'character' ? setProfileTarget(q) : onZkillLookup?.(q, cat)}
                   onFocus={() => bringToFront(ch.id)}
                 />
               ))}
@@ -983,6 +1000,13 @@ export default function IntelPanel({ shipLocation, characterId, characterName, o
           </div>
         )}
       </div>
+
+      <CharacterProfileWindow
+        name={profileTarget}
+        onClose={() => setProfileTarget(null)}
+        onViewKillboard={name => { onZkillLookup?.(name, 'character'); setProfileTarget(null) }}
+        onProfileFetched={onCharacterProfileFetched}
+      />
     </div>
   )
 }

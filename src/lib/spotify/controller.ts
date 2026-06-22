@@ -17,6 +17,7 @@ export interface PlaybackState {
   volumePct: number        // 0–100
   track: SpotifyTrack | null
   itemType: 'track' | 'episode' | 'ad' | 'unknown'
+  shuffleState: boolean
   progressMs: number
   deviceId: string | null
   deviceName: string | null
@@ -36,6 +37,7 @@ export async function getPlaybackState(): Promise<PlaybackState | null> {
     deviceName:  data.device.name,
     track:       data.item ? normaliseTrack(data.item) : null,
     itemType:    (data.currently_playing_type ?? 'unknown') as PlaybackState['itemType'],
+    shuffleState: data.shuffle_state ?? false,
   }
 }
 
@@ -62,6 +64,11 @@ export async function skipPrev(deviceId?: string): Promise<void> {
 }
 
 // ── Volume ────────────────────────────────────────────────────────────────────
+
+export async function setShuffle(enabled: boolean, deviceId?: string): Promise<void> {
+  const qs = deviceId ? `?state=${enabled}&device_id=${deviceId}` : `?state=${enabled}`
+  await spotifyFetch(`/me/player/shuffle${qs}`, { method: 'PUT' })
+}
 
 export async function setVolume(pct: number, deviceId?: string): Promise<void> {
   const vol = Math.max(0, Math.min(100, Math.round(pct)))
@@ -200,6 +207,7 @@ interface SpotifyPlayerResponse {
   progress_ms: number | null
   item: RawTrack | null
   currently_playing_type: string
+  shuffle_state: boolean
   device: {
     id: string | null
     name: string

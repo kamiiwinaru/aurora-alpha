@@ -49,9 +49,14 @@ function isSystemName(word: string): boolean {
   return EVE_SYSTEM_NAMES.has(word.toLowerCase())
 }
 
+// All-caps words (3+ chars) are abbreviations / system codes / corp tickers, never character name words
+function isAllCaps(word: string): boolean {
+  return word.length >= 3 && word === word.toUpperCase() && /[A-Z]/.test(word)
+}
+
 // A word that should break a character-name sequence
 function isBlockingWord(word: string): boolean {
-  return CHAR_STOPWORDS.has(word) || isShipName(word) || isSystemName(word)
+  return CHAR_STOPWORDS.has(word) || isShipName(word) || isSystemName(word) || isAllCaps(word)
 }
 
 // ── Span builder ───────────────────────────────────────────────────────────────
@@ -151,8 +156,8 @@ export function buildSpans(msg: string, knownNames: string[] = []): Span[] {
     }
   }
 
-  // De-overlap: sort by position, drop anything that starts inside a prior span
-  spans.sort((a, b) => a.start - b.start)
+  // De-overlap: sort by position, longest span wins when start positions tie
+  spans.sort((a, b) => a.start !== b.start ? a.start - b.start : b.end - a.end)
   const deduped: Span[] = []
   let cursor = 0
   for (const s of spans) {

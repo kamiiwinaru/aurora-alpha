@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { Search, ExternalLink, RefreshCw, TrendingUp, TrendingDown, Minus, Copy, Check, Truck, X, BarChart2 } from 'lucide-react'
 import { formatISK } from '../../lib/eve-esi'
@@ -26,9 +26,11 @@ interface AppraisalResult {
 
 interface JanicePanelProps {
   onSendToFreight?: (collateral: number, volume: number) => void
+  preloadText?: string | null
+  onPreloadConsumed?: () => void
 }
 
-export default function JanicePanel({ onSendToFreight }: JanicePanelProps) {
+export default function JanicePanel({ onSendToFreight, preloadText, onPreloadConsumed }: JanicePanelProps) {
   const [input, setInput] = useState('')
   const [market, setMarket] = useState('Jita')
   const [loading, setLoading] = useState(false)
@@ -37,8 +39,17 @@ export default function JanicePanel({ onSendToFreight }: JanicePanelProps) {
   const [copied, setCopied] = useState(false)
   const [showChart, setShowChart] = useState(false)
 
-  const appraise = async () => {
-    if (!input.trim()) return
+  useEffect(() => {
+    if (!preloadText) return
+    setInput(preloadText)
+    onPreloadConsumed?.()
+    appraise(preloadText)
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [preloadText])
+
+  const appraise = async (overrideText?: string | null) => {
+    const text = (typeof overrideText === 'string' ? overrideText : input).trim()
+    if (!text) return
     setLoading(true)
     setError(null)
     setResult(null)
@@ -47,7 +58,7 @@ export default function JanicePanel({ onSendToFreight }: JanicePanelProps) {
       const res = await fetch('/api/janice', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ items: input.trim(), market }),
+        body: JSON.stringify({ items: text, market }),
       })
       const data: AppraisalResult = await res.json()
       if ((data as { error?: string }).error) throw new Error((data as { error?: string }).error)
@@ -219,10 +230,35 @@ export default function JanicePanel({ onSendToFreight }: JanicePanelProps) {
 
             <div className="flex gap-2">
               {result.code && (
-                <button onClick={() => window.open(`https://janice.e-351.com/a/${result.code}`, '_blank')}
-                  className="eve-btn flex items-center gap-2 justify-center py-1.5 flex-1">
-                  <ExternalLink size={11} />VIEW FULL APPRAISAL ON JANICE
-                </button>
+                <div className="eve-panel flex items-center gap-2 px-2 py-1.5 flex-1 min-w-0">
+                  <ExternalLink size={10} className="text-eve-dim shrink-0" />
+                  <span className="text-[10px] text-eve-muted font-mono truncate flex-1 select-all">
+                    https://janice.e-351.com/a/{result.code}
+                  </span>
+                  <button
+                    onClick={() => {
+                      const url = `https://janice.e-351.com/a/${result.code}`
+                      try {
+                        const ta = document.createElement('textarea')
+                        ta.value = url
+                        ta.style.position = 'fixed'
+                        ta.style.opacity = '0'
+                        document.body.appendChild(ta)
+                        ta.select()
+                        document.execCommand('copy')
+                        document.body.removeChild(ta)
+                      } catch {
+                        navigator.clipboard.writeText(url).catch(() => {})
+                      }
+                      setCopied(true)
+                      setTimeout(() => setCopied(false), 2000)
+                    }}
+                    className="shrink-0 text-eve-dim hover:text-eve-cyan transition-colors"
+                    title="Copy URL"
+                  >
+                    {copied ? <Check size={11} className="text-eve-green" /> : <Copy size={11} />}
+                  </button>
+                </div>
               )}
               {onSendToFreight && totals && (
                 <button

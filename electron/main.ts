@@ -223,8 +223,11 @@ mainWindow.webContents.setWindowOpenHandler(({ url }) => {
     mainWindow.setFullScreen(!mainWindow.isFullScreen())
   })
 
-  globalShortcut.register('Escape', () => {
-    if (mainWindow?.isFullScreen()) mainWindow.setFullScreen(false)
+  // Use window-local input event so Escape is not stolen from other apps globally
+  mainWindow.webContents.on('before-input-event', (_e, input) => {
+    if (input.type === 'keyDown' && input.key === 'Escape' && mainWindow?.isFullScreen()) {
+      mainWindow.setFullScreen(false)
+    }
   })
 
   if (isDev) {
@@ -252,9 +255,9 @@ mainWindow.webContents.setWindowOpenHandler(({ url }) => {
   })
 
   if (isDev) {
-    const tryLoad = (retries = 20) => {
+    const tryLoad = (retries = 60) => {
       mainWindow?.loadURL('http://localhost:5173').catch(() => {
-        if (retries > 0) setTimeout(() => tryLoad(retries - 1), 500)
+        if (retries > 0) setTimeout(() => tryLoad(retries - 1), 750)
       })
     }
     tryLoad()

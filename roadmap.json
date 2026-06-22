@@ -170,7 +170,7 @@
     "id": "cd53fd98-5143-4770-be7f-66e6d299a660",
     "title": "Private Ship Fitting File Sharing",
     "description": "Allow pilots to share ship fittings privately via generated links. Recipients can view the fitting without needing an account or API key.",
-    "status": "planned",
+    "status": "done",
     "category": "General",
     "notes": [
       "Link-based sharing — generate a unique URL per fitting",
@@ -285,7 +285,7 @@
     "id": "5e6a6b6d-acca-437a-8bae-be65a0b8b140",
     "title": "LP Store Optimizer",
     "description": "Ranks LP store redemption options by ISK/LP ratio across all of the pilot's LP wallets. Pulls public LP store offers via ESI (no auth required for store data), appraises outputs at Jita market prices, and calculates net ISK per LP spent to identify the best redemption targets.",
-    "status": "in-progress",
+    "status": "done",
     "category": "EVE Data",
     "notes": [
       "LP store offers endpoint is fully public — no auth scope needed, cache aggressively and keep local",
@@ -310,16 +310,19 @@
   },
   {
     "id": "5484ea16-43ad-4031-80ea-cac7d9b447a4",
-    "title": "Agent Finder via ESI",
-    "description": "Integrate EVE ESI agent data to allow pilots to query agents by corporation, division, level, and security status. Should support filtering by nearest location and sorting by jump distance from current position.",
+    "title": "Agent Finder & Station Services Lookup",
+    "description": "Allow pilots to search for NPC agents by corporation, division, level, and security status, and find nearest NPC stations by service type (clone bay, repair, reprocessing, factory, etc.) relative to current location or any named system. Data sourced from ESI and/or SDE static dump.",
     "status": "consideration",
     "category": "EVE Data",
     "notes": [
-      "Check ESI /universe/stations/ and /agents/ endpoints for agent data availability",
-      "Filter by corporation (e.g. Ministry of War), agent level, division, and security status",
-      "Sort results by jump distance from pilot's current location using plan_route",
-      "ESI may not expose full agent database — fallback to static data dump (SDE) if needed",
-      "Surface closest + highest quality agent as primary result"
+      "ESI /agents/ endpoint — verify coverage; fallback to SDE agent table if incomplete",
+      "SDE staStations table includes service bitmask for clone bay, repair, factory, reprocessing, insurance, etc.",
+      "Filter agents by corporation, division, level, and security status",
+      "Filter stations by service type",
+      "Sort all results by jump distance from pilot's current location using plan_route",
+      "Surface closest + highest quality agent as primary result",
+      "Use cases: nearest Ministry of War agent, nearest clone bay to X system",
+      "Route integration — return jump count from origin system"
     ]
   },
   {
@@ -401,9 +404,9 @@
   },
   {
     "id": "84ea10fc-0cdf-484d-a622-9c50106bd306",
-    "title": "EVE Agent Finder via ESI/SDE",
+    "title": "DUPLICATE — merged into Agent Finder & Station Services Lookup",
     "description": "Allow pilots to search for NPC agents by corporation, division, level, and security status. Show nearest agents to current location with jump count. Data likely available via the SDE static dump (agents table) even if not directly via ESI.",
-    "status": "consideration",
+    "status": "done",
     "category": "EVE Data",
     "notes": [
       "Confirm whether ESI exposes agent data or if SDE-only",
@@ -427,9 +430,9 @@
   },
   {
     "id": "322f05b7-1f8e-4546-b235-a8440282aa63",
-    "title": "Agent Finder & Station Services Lookup",
+    "title": "DUPLICATE — merged into Agent Finder & Station Services Lookup",
     "description": "Allow pilots to query NPC agents by corp/faction/level/type and find nearest stations by service type (clone bay, repair, reprocessing, etc.) relative to their current location or any named system. Data sourced from ESI and/or SDE static dump.",
-    "status": "consideration",
+    "status": "done",
     "category": "EVE Data",
     "notes": [
       "ESI may expose agent data — verify endpoint coverage",
@@ -440,9 +443,9 @@
   },
   {
     "id": "3dcf054a-e72a-433c-9e3e-8d78e25ac373",
-    "title": "Nearest Station by Service Type",
+    "title": "DUPLICATE — merged into Agent Finder & Station Services Lookup",
     "description": "Allow pilots to query for the nearest NPC station offering a specific service (clone bay, repair, reprocessing, etc.) from their current location or any given system. Data sourced from the SDE station tables which include service flags.",
-    "status": "consideration",
+    "status": "done",
     "category": "EVE Data",
     "notes": [
       "SDE station tables include service flags for clone bay, repair, factory, etc.",
@@ -481,7 +484,7 @@
     "id": "cc897392-7fbb-4a23-a3a6-c39272e887b1",
     "title": "Import fit from Fit Analyzer into Blueprint Planner",
     "description": "Allow pilots to import a ship fit directly from the Fit Analyzer into the Blueprint Planner, automatically resolving the full build tree — hull, modules, rigs, charges, and drones — into their corresponding blueprints and material requirements for a one-click production plan.",
-    "status": "planned",
+    "status": "done",
     "category": "EVE Data",
     "notes": [
       "Resolve each fit item to its blueprint (hull + all modules, rigs, ammo, drones)",
@@ -489,6 +492,32 @@
       "Show aggregated material list across all blueprints in the fit",
       "Flag any missing blueprints in the pilot's inventory",
       "Option to queue all resolved jobs directly from the import view"
+    ]
+  },
+  {
+    "id": "5af90c3f-8311-49c3-8020-490c90e4ff05",
+    "title": "Asset Value Tracker",
+    "description": "Track total asset value across all locations over time, giving pilots a portfolio-style view of their net worth in EVE. Allows comparison against previous snapshots to see growth or loss.",
+    "status": "done",
+    "category": "EVE Data",
+    "notes": [
+      "Requested by Holzer",
+      "Snapshots total estimated asset value (Jita appraisal basis)",
+      "Historical tracking — show value over time",
+      "Flex on your haters"
+    ]
+  },
+  {
+    "id": "20c42dc3-ea20-455c-b7d3-a60bd446d2fe",
+    "title": "Character Intel Lookup",
+    "description": "Allow pilots to look up any EVE character by name directly from the intel feed or chat. Returns corp, alliance, security status, kill/loss history, typical ships flown, and threat assessment.",
+    "status": "planned",
+    "category": "Aurora AI",
+    "notes": [
+      "Integrate zKillboard API for kill/loss history and ship preferences",
+      "ESI lookup for corp, alliance, security status, age",
+      "Threat scoring based on killboard activity",
+      "Trigger from intel feed pilot names directly"
     ]
   }
 ]

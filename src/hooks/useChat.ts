@@ -78,6 +78,12 @@ interface EveContext {
   planets?: Array<{ solarSystemName: string; planetType: string; upgradeLevel: number; numPins: number }>
   calendarEvents?: Array<{ date: string; title: string; response: string }>
   mail?: EveMail[]
+  recentCharacterProfiles?: Array<{
+    name: string; securityStatus: number; birthday: string
+    corporation: { name: string; ticker: string; memberCount: number } | null
+    alliance: { name: string; ticker: string } | null
+    zkill: { kills: number; losses: number; iskDestroyed: number; iskLost: number }
+  }>
 }
 
 const VOICE_ENABLED_KEY = 'aurora_voice_enabled'
@@ -155,6 +161,38 @@ function formatLocationAssets(assets: EveAsset[], locQuery: string): string {
   return lines.join('\n')
 }
 // ─────────────────────────────────────────────────────────────────────────────
+
+// Module-level alert queue — serialises concurrent intel TTS so alerts play one after another
+const _alertQueue: string[] = []
+let _alertDraining = false
+async function drainAlertQueue() {
+  if (_alertDraining) return
+  _alertDraining = true
+  while (_alertQueue.length > 0) {
+    const text = _alertQueue[0]
+    try {
+      const res = await fetch('/api/tts', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text, mode: 'full' }),
+      })
+      if (res.ok) {
+        const arrayBuffer = await res.arrayBuffer()
+        const ctx = new AudioContext()
+        const audioBuffer = await ctx.decodeAudioData(arrayBuffer)
+        const source = ctx.createBufferSource()
+        source.buffer = audioBuffer
+        const gain = ctx.createGain()
+        gain.gain.value = Number(localStorage.getItem('aurora_tts_volume') ?? '1')
+        source.connect(gain)
+        gain.connect(ctx.destination)
+        await new Promise<void>(resolve => { source.onended = () => { ctx.close(); resolve() }; source.start(0) })
+      }
+    } catch { /* blocked */ }
+    _alertQueue.shift()
+  }
+  _alertDraining = false
+}
 
 export function useChat(eveContext?: EveContext) {
   const [conversations, setConversations] = useState<Conversation[]>(loadConversations)
@@ -323,8 +361,15 @@ You have zero skill, blueprint, attribute, or industry job data in your context.
 - **get_mail**: use for ANY question about the pilot's messages — unread mail, what someone sent, reading inbox. Supports filter (all/unread/read) and text search.
 - **get_contracts**: use for ANY question about the pilot's contracts — outstanding deals, courier jobs, expired contracts, what's expiring soon. Filter by status or use "attention" for items needing action.
 
+### PVE & Missions
+- **query_missions**: use for ANY question about a specific mission — damage types, EWAR threats, wave composition, NPC triggers, blitz strategy, standing loss, ship recommendations. Also use when the pilot asks about missions for a faction (e.g. "level 4 Serpentis missions") or wants to compare options. Pass the mission name (partial match works) and optionally a level filter. Never guess mission details from memory — data is sourced from EVE University wiki.
+
 ### Navigation
 - **plan_route**: REQUIRED for any route planning, travel directions, or "how do I get from X to Y" question. Always pass all jump bridges from context. Returns full hop list, jump count, light-years, and direct cyno distance. Never calculate routes from memory.
+
+### Intel & Character Lookup
+- **lookup_character**: use when the pilot asks who a character is, what corp or alliance someone is in, their security status, or wants intel on a specific pilot. **NEVER call this tool if the character already appears in the RECENT CHARACTER LOOKUPS section in context — read from there directly.** Never guess character affiliations from memory.
+- When reporting character details, deliver a 2–3 line threat summary: corp/alliance, sec status, kill/loss record, and a one-line threat assessment. No tables. No headers. No restating fields the pilot didn't ask for.
 
 ### Market tools
 - **appraise_items**: use for any price lookup, appraisal, or "what is X worth" question. Pass item names with optional quantities as a newline-separated string.
@@ -475,6 +520,19 @@ If the pilot asks about the game, high scores, strategy, or their current ship t
       systemDynamic += `\n\n## NOTIFICATIONS (${eveContext.notifications.length} unread): ${eveContext.notifications.slice(0,6).map(n=>n.type.replace(/_/g,' ')).join(', ')}`
     }
 
+    // ── Recently viewed character profiles ───────────────────────────────
+    if (eveContext?.recentCharacterProfiles?.length) {
+      systemDynamic += `\n\n## RECENT CHARACTER LOOKUPS (read directly, do not call lookup_character for these pilots)`
+      for (const p of eveContext.recentCharacterProfiles) {
+        const total = p.zkill.kills + p.zkill.losses
+        const eff = total > 0 ? Math.round(p.zkill.kills / total * 100) : null
+        const corp = p.corporation ? `${p.corporation.name} [${p.corporation.ticker}] ${p.corporation.memberCount.toLocaleString()}m` : 'Unknown'
+        const alliance = p.alliance ? ` / ${p.alliance.name} [${p.alliance.ticker}]` : ''
+        const zkill = total > 0 ? ` | ${p.zkill.kills} kills / ${p.zkill.losses} losses (${eff}% eff) ${(p.zkill.iskDestroyed/1e9).toFixed(2)}B ISK destroyed` : ''
+        systemDynamic += `\n- **${p.name}** sec:${p.securityStatus.toFixed(1)} born:${p.birthday.slice(0,10)} | ${corp}${alliance}${zkill}`
+      }
+    }
+
     // ── Jump bridges ─────────────────────────────────────────────────────
     try {
       const stored = JSON.parse(localStorage.getItem('aurora_custom_bridges') ?? '[]') as Array<{ from: string; to: string }>
@@ -617,7 +675,7 @@ If the pilot asks about the game, high scores, strategy, or their current ship t
         signal: abortRef.current.signal,
         body: JSON.stringify({
           ...buildSystemPrompt(),
-          messages: history.map(m => ({ role: m.role, content: m.content })),
+          messages: history.slice(-20).map(m => ({ role: m.role, content: m.content })),
           characterId: eveContext?.character?.characterId,
           previousMessageId: lastResponseIds.current[convId!] ?? null,
           spotifyToken,
@@ -796,7 +854,7 @@ If the pilot asks about the game, high scores, strategy, or their current ship t
         signal: abortRef.current.signal,
         body: JSON.stringify({
           ...buildSystemPrompt(),
-          messages: history.map(m => ({ role: m.role, content: m.content })),
+          messages: history.slice(-20).map(m => ({ role: m.role, content: m.content })),
           characterId: eveContext?.character?.characterId,
           previousMessageId: null,
           spotifyToken,
@@ -899,27 +957,10 @@ If the pilot asks about the game, high scores, strategy, or their current ship t
     }
   }, [buildSystemPrompt, eveContext?.character?.characterId, voiceEnabled, ttsMode])
 
-  const speakAlert = useCallback(async (text: string) => {
+  const speakAlert = useCallback((text: string) => {
     if (!voiceEnabled) return
-    try {
-      const res = await fetch('/api/tts', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text, mode: 'full' }),
-      })
-      if (!res.ok) return
-      const arrayBuffer = await res.arrayBuffer()
-      const ctx = new AudioContext()
-      const audioBuffer = await ctx.decodeAudioData(arrayBuffer)
-      const source = ctx.createBufferSource()
-      source.buffer = audioBuffer
-      const gain = ctx.createGain()
-      gain.gain.value = Number(localStorage.getItem('aurora_tts_volume') ?? '1')
-      source.connect(gain)
-      gain.connect(ctx.destination)
-      source.onended = () => ctx.close()
-      source.start(0)
-    } catch { /* blocked */ }
+    _alertQueue.push(text)
+    drainAlertQueue()
   }, [voiceEnabled])
 
   const appendToSession = useCallback((convId: string, userText: string, assistantText: string) => {

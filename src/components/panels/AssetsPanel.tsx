@@ -1,6 +1,13 @@
-import { useState, useRef, useMemo, useEffect } from 'react'
-import { Search, RefreshCw, Package, Bot, Send, X, ChevronDown, ChevronRight, FlaskConical, Archive } from 'lucide-react'
+import { useState, useRef, useMemo, useEffect, useCallback } from 'react'
+import { Search, RefreshCw, Package, Bot, Send, X, ChevronDown, ChevronRight, FlaskConical, Archive, TrendingUp, DollarSign } from 'lucide-react'
 import type { EveAsset, EveBlueprint } from '../../types'
+
+function formatISK(v: number): string {
+  if (v >= 1e12) return `${(v / 1e12).toFixed(2)}T ISK`
+  if (v >= 1e9)  return `${(v / 1e9).toFixed(2)}B ISK`
+  if (v >= 1e6)  return `${(v / 1e6).toFixed(2)}M ISK`
+  return `${Math.round(v).toLocaleString()} ISK`
+}
 
 interface BlueprintImport {
   typeId: number
@@ -17,6 +24,7 @@ interface AssetsPanelProps {
   characterId?: number
   onRefresh: () => void
   onBlueprintClick?: (bp: BlueprintImport) => void
+  onAppraiseAll?: (text: string) => void
   noAIMode?: boolean
 }
 
@@ -233,7 +241,7 @@ const CAT_PATTERNS: Array<{ re: RegExp; cat: string }> = [
   { re: /\b(modules?|fittings?|rigs?|mods?)\b/i, cat: 'MODULES' },
 ]
 
-export default function AssetsPanel({ assets, blueprints = [], loading, characterId, onRefresh, onBlueprintClick, noAIMode }: AssetsPanelProps) {
+export default function AssetsPanel({ assets, blueprints = [], loading, characterId, onRefresh, onBlueprintClick, onAppraiseAll, noAIMode }: AssetsPanelProps) {
   const blueprintByItemId = useMemo(() =>
     new Map(blueprints.map(b => [b.itemId, b])), [blueprints]
   )
@@ -242,6 +250,48 @@ export default function AssetsPanel({ assets, blueprints = [], loading, characte
   const [groupBy, setGroupBy] = useState<'type' | 'location' | 'category'>('location')
   const [categoryFilter, setCategoryFilter] = useState<string>('ALL')
   const [expanded, setExpanded] = useState<Record<string, boolean>>({})
+
+  const [priceMap, setPriceMap] = useState<Record<number, number>>({})
+  const [priceLoading, setPriceLoading] = useState(false)
+  const [priceFetchedAt, setPriceFetchedAt] = useState<number | null>(null)
+  const [priceError, setPriceError] = useState<string | null>(null)
+
+  const fetchPrices = useCallback(async () => {
+    setPriceLoading(true)
+    setPriceError(null)
+    try {
+      const res = await fetch('/api/markets/prices')
+      if (!res.ok) {
+        setPriceError(`HTTP ${res.status}`)
+        return
+      }
+      const data = await res.json()
+      const prices = data.prices ?? {}
+      const count = Object.keys(prices).length
+      if (count === 0) {
+        setPriceError('ESI returned no prices')
+        return
+      }
+      setPriceMap(prices)
+      setPriceFetchedAt(Date.now())
+    } catch (err) {
+      setPriceError(err instanceof Error ? err.message : 'fetch failed')
+    } finally {
+      setPriceLoading(false)
+    }
+  }, [])
+
+  useEffect(() => { fetchPrices() }, [fetchPrices])
+
+  const totalValue = useMemo(() => {
+    if (!Object.keys(priceMap).length) return null
+    let sum = 0
+    for (const a of assets) {
+      const price = priceMap[a.typeId]
+      if (price) sum += price * a.quantity
+    }
+    return sum
+  }, [assets, priceMap])
 
   const [bpOpen, setBpOpen] = useState(false)
   const [query, setQuery] = useState('')
@@ -395,9 +445,31 @@ export default function AssetsPanel({ assets, blueprints = [], loading, characte
       {/* Header */}
       <div className="flex items-center justify-between">
         <span className="eve-header mb-0">ASSET REGISTRY</span>
-        <button onClick={onRefresh} className="eve-btn p-1" title="Refresh assets">
-          <RefreshCw size={11} className={loading ? 'animate-spin' : ''} />
-        </button>
+        <div className="flex items-center gap-1.5">
+          {onAppraiseAll && assets.length > 0 && (
+            <button
+              onClick={() => {
+                const agg = new Map<number, { name: string; qty: number }>()
+                for (const a of assets) {
+                  const existing = agg.get(a.typeId)
+                  if (existing) existing.qty += a.quantity
+                  else agg.set(a.typeId, { name: a.typeName, qty: a.quantity })
+                }
+                const text = [...agg.values()]
+                  .map(({ name, qty }) => `${name} ${qty}`)
+                  .join('\n')
+                onAppraiseAll(text)
+              }}
+              className="eve-btn flex items-center gap-1 px-2 py-1 text-[10px]"
+              title="Appraise all assets in Janice"
+            >
+              <DollarSign size={10} />APPRAISE ALL
+            </button>
+          )}
+          <button onClick={onRefresh} className="eve-btn p-1" title="Refresh assets">
+            <RefreshCw size={11} className={loading ? 'animate-spin' : ''} />
+          </button>
+        </div>
       </div>
 
       {/* Stats */}
@@ -413,6 +485,33 @@ export default function AssetsPanel({ assets, blueprints = [], loading, characte
             <div className="eve-label text-[9px]">{stat.label}</div>
           </div>
         ))}
+      </div>
+
+      {/* Total value card */}
+      <div className="eve-panel p-2.5 flex items-center justify-between">
+        <div className="flex items-center gap-2">
+          <TrendingUp size={11} className="text-eve-gold shrink-0" />
+          <div>
+            <div className="text-eve-gold font-mono text-sm leading-tight">
+              {priceLoading
+                ? <span className="text-eve-muted text-xs animate-pulse">calculating…</span>
+                : priceError
+                  ? <span className="text-eve-red text-[10px]">{priceError}</span>
+                  : totalValue == null
+                    ? <span className="text-eve-muted text-xs">—</span>
+                    : formatISK(totalValue)}
+            </div>
+            <div className="eve-label text-[9px]">EST. TOTAL VALUE (adjusted price)</div>
+          </div>
+        </div>
+        <button
+          onClick={fetchPrices}
+          disabled={priceLoading}
+          className="eve-btn p-1 disabled:opacity-40"
+          title={priceFetchedAt ? `Prices fetched ${Math.round((Date.now() - priceFetchedAt) / 60000)}m ago` : 'Fetch prices'}
+        >
+          <RefreshCw size={10} className={priceLoading ? 'animate-spin' : ''} />
+        </button>
       </div>
 
       {/* Haiku query */}
