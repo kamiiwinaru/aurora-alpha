@@ -6,12 +6,16 @@
 - **Pilot profile window** — clicking a hostile pilot name in the Intel panel now opens a profile card showing their security status, corporation, alliance, and zKillboard stats (kills, losses, ISK destroyed/lost, efficiency). Opens inline instead of navigating away to zkill.
 - **In-app patch notes** — clicking the version number in the header opens a changelog viewer. Also auto-opens once after each update so you never miss what changed.
 - **Reminders** — bell icon added to the Aurora sidebar (mirroring the Todo notepad). Set timed reminders with natural language ("in 2h check market"), countdown display, and a toast alert when they fire. Aurora can set reminders via the `set_reminder` tool.
+- **Multi-fit build plan** — the Fit Build Plan in the Industry panel now accepts multiple fits at once. Pick saved fits from a dropdown and/or paste EFT text, resolve all of them together, and quantities are merged by blueprint so duplicated modules across fits are summed. An "All Steps" button merges the full production chain across every item in the plan into a single buy list and job breakdown.
+- **Production chain section ordering** — chain breakdown now splits into labelled sections: Mfg Intermediates (feeds into reactions), Simple Reactions, Advanced Reactions, and final Manufacturing — each collapsible, colour-coded, and included in CSV export.
 - **Assets panel valuation** — ESI adjusted prices are fetched on load and the total estimated ISK value of all assets is displayed. An "Appraise All" button sends the full asset list directly to the Janice panel.
 - **PVE mission database** — the PVE panel now includes a mission lookup tab. Search by mission name to see damage types dealt/resisted, NPC breakdown per pocket (type, class, ewar, webs, points), blitz notes, and faction damage fallbacks for missions without explicit wiki data.
 - **Intel gang-size tiering** — voice alert phrases now scale with the number of hostiles reported. Solo contacts get brief warnings; small gangs (2–4), spikes (5–10), and fleets (11+) each get progressively more urgent language.
 - **Intel "all clear" range check** — clear alerts now only fire if the system being cleared is within your configured alert jump threshold, matching the same range logic as hostile alerts.
 - **Janice preload from Assets** — the "Appraise All" button in Assets sends a pre-built item list to Janice and triggers an immediate appraisal without any copy-paste.
 - **Janice URL copy** — appraisal link now displays inline with a copy button instead of opening a new tab automatically.
+- **Character profile API** — server-side `/api/character/profile` endpoint fetches ESI character info + zKillboard stats, cached in-memory for 10 minutes to avoid redundant lookups.
+- **Adjusted price API** — `/api/markets/prices` endpoint returns ESI adjusted prices for all types, used by the Assets valuation feature.
 
 ### Changed
 - Intel hostile names in chat log are now clickable — opens the pilot profile window instead of jumping to zKillboard.
