@@ -59,6 +59,14 @@ interface MissionExtra {
   note: string
 }
 
+interface MissionLoot {
+  bounty: string | null
+  loot: string | null
+  salvage: string | null
+  tags: string | null
+  items: string[]
+}
+
 interface MissionEntry {
   id: string
   name: string
@@ -75,6 +83,7 @@ interface MissionEntry {
   briefing: string | null
   pockets: MissionPocket[]
   blitz: string | null
+  loot: MissionLoot | null
 }
 
 interface Props {
@@ -627,6 +636,36 @@ function MissionDetail({ mission }: { mission: MissionEntry }) {
               )
             })}
           </div>
+        </div>
+      )}
+
+      {/* Loot / Salvage / Bounty */}
+      {mission.loot && (
+        <div>
+          <p className="text-[9px] text-eve-gold uppercase tracking-widest mb-1.5">Loot, Salvage &amp; Bounty</p>
+          {(mission.loot.bounty || mission.loot.loot || mission.loot.salvage || mission.loot.tags) && (
+            <div className="flex flex-wrap gap-x-5 gap-y-1 mb-1.5">
+              {mission.loot.bounty && (
+                <span className="text-[10px] text-eve-dim">Bounty: <span className="text-eve-gold">{mission.loot.bounty}</span></span>
+              )}
+              {mission.loot.loot && (
+                <span className="text-[10px] text-eve-dim">Loot: <span className="text-eve-gold">{mission.loot.loot}</span></span>
+              )}
+              {mission.loot.salvage && (
+                <span className="text-[10px] text-eve-dim">Salvage: <span className="text-eve-gold">{mission.loot.salvage}</span></span>
+              )}
+              {mission.loot.tags && (
+                <span className="text-[10px] text-eve-dim">Tags: <span className="text-eve-gold">{mission.loot.tags}</span></span>
+              )}
+            </div>
+          )}
+          {mission.loot.items.length > 0 && (
+            <div className="flex flex-wrap gap-1">
+              {mission.loot.items.map(item => (
+                <span key={item} className="text-[9px] text-eve-muted border border-eve-border/50 px-1.5 py-0.5 rounded">{item}</span>
+              ))}
+            </div>
+          )}
         </div>
       )}
 

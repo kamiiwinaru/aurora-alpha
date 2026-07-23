@@ -1,13 +1,14 @@
 import { useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { AnimatePresence, motion } from 'framer-motion'
+import { codeToLabel, normalizeStoredPttKey, syncPttKeyToMain, MODIFIER_CODES, PTT_CODE_DEFAULT } from '../lib/pttKeys'
 
 const MIC_DEVICE_KEY   = 'aurora_mic_device_id'
 const VOLUME_KEY       = 'aurora_tts_volume'
 const FONT_SIZE_KEY    = 'aurora_font_size'
 const FONT_DENSITY_KEY = 'aurora_font_density'
 export const PTT_KEY_STORAGE    = 'aurora_ptt_key'
-export const PTT_KEY_DEFAULT    = '`'
+export const PTT_KEY_DEFAULT    = PTT_CODE_DEFAULT
 export const NOISE_FLOOR_KEY    = 'aurora_noise_floor'
 export const NOISE_FLOOR_DEFAULT = 12
 
@@ -363,20 +364,12 @@ function DisplaySection() {
 }
 
 // ── PTT Key ───────────────────────────────────────────────────────────────────
-const MODIFIER_KEYS = new Set(['Shift','Control','Alt','Meta','CapsLock','Tab','OS'])
-
-function formatKey(key: string): string {
-  if (key === ' ') return 'Space'
-  if (key === 'Escape') return 'Esc'
-  if (key === 'ArrowUp') return '↑'
-  if (key === 'ArrowDown') return '↓'
-  if (key === 'ArrowLeft') return '←'
-  if (key === 'ArrowRight') return '→'
-  return key.length === 1 ? key.toUpperCase() : key
-}
+// Bound on KeyboardEvent.code (physical key), not .key (shifted character) —
+// see src/lib/pttKeys.ts for why.
 
 function PttKeySection() {
-  const [currentKey, setCurrentKey] = useState(() => localStorage.getItem(PTT_KEY_STORAGE) ?? PTT_KEY_DEFAULT)
+  const [currentKey, setCurrentKey] = useState(() =>
+    normalizeStoredPttKey(localStorage.getItem(PTT_KEY_STORAGE) ?? PTT_KEY_DEFAULT))
   const [capturing, setCapturing] = useState(false)
 
   useEffect(() => {
@@ -384,14 +377,13 @@ function PttKeySection() {
     function onKeyDown(e: KeyboardEvent) {
       e.preventDefault()
       e.stopPropagation()
-      if (MODIFIER_KEYS.has(e.key)) return
-      const key = e.key
-      setCurrentKey(key)
+      if (MODIFIER_CODES.has(e.code)) return
+      const code = e.code
+      setCurrentKey(code)
       setCapturing(false)
-      localStorage.setItem(PTT_KEY_STORAGE, key)
-      window.dispatchEvent(new CustomEvent('aurora_ptt_changed', { detail: key }))
-      const api = (window as any).electronAPI
-      api?.setPttKey?.(key)
+      localStorage.setItem(PTT_KEY_STORAGE, code)
+      window.dispatchEvent(new CustomEvent('aurora_ptt_changed', { detail: code }))
+      syncPttKeyToMain(code)
     }
     function onKeyUp(e: KeyboardEvent) {
       if (e.key === 'Escape') { e.preventDefault(); setCapturing(false) }
@@ -409,7 +401,7 @@ function PttKeySection() {
       <Label>PTT Key</Label>
       <div className="flex items-center gap-2">
         <kbd className="px-2 py-1 text-[11px] font-mono text-cyan-300 bg-cyan-400/10 border border-cyan-400/30 rounded-sm min-w-[2rem] text-center">
-          {formatKey(currentKey)}
+          {codeToLabel(currentKey)}
         </kbd>
         <button
           onClick={() => setCapturing(true)}
@@ -427,8 +419,7 @@ function PttKeySection() {
               setCurrentKey(PTT_KEY_DEFAULT)
               localStorage.setItem(PTT_KEY_STORAGE, PTT_KEY_DEFAULT)
               window.dispatchEvent(new CustomEvent('aurora_ptt_changed', { detail: PTT_KEY_DEFAULT }))
-              const api = (window as any).electronAPI
-              api?.setPttKey?.(PTT_KEY_DEFAULT)
+              syncPttKeyToMain(PTT_KEY_DEFAULT)
             }}
             className="text-[9px] text-eve-dim hover:text-eve-muted transition-colors"
             title="Reset to default"

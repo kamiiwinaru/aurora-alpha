@@ -247,6 +247,261 @@ function parseBlitz(wikitext) {
   return lines.length ? lines.join('\n') : null
 }
 
+function parseLoot(wikitext) {
+  // Find any section whose title contains Loot, Salvage, Bounty, Rewards, or Tag(s)
+  const sectionRe = /={2,4}[^=\n]*(?:Loot|Salvage|Bounty|Reward|[Tt]ags?)[^=\n]*={2,4}\s*\n([\s\S]*?)(?=\n={2,4}[^=]|\n{{(?!NPC)|$)/gi
+  let allBody = ''
+  let sm
+  while ((sm = sectionRe.exec(wikitext)) !== null) allBody += sm[1] + '\n'
+
+  // Also capture '''Tags''' bold inline blocks (e.g. '''Tags''' (all spawns): followed by bullets)
+  const boldTagRe = /'''[Tt]ags?'''[^'\n]*:?\s*\n((?:[*\s][^\n]+\n?)+)/g
+  let bm
+  while ((bm = boldTagRe.exec(wikitext)) !== null) allBody += bm[1] + '\n'
+
+  const result = { bounty: null, loot: null, salvage: null, tags: null, items: [] }
+
+  // Normalise ISK value strings: strip dates, br tags, wiki bold markers
+  function cleanVal(v) {
+    return v.replace(/\([^)]*\d{4}[^)]*\)/g, '').replace(/<br\s*\/?>/gi, '').replace(/'{2,3}/g, '').trim()
+  }
+
+  // ISK value pattern — includes mil/Mio variants
+  const ISK_VAL = /[\d~<>,.]+\s*(?:[-–]\s*[\d~,.]+\s*)?(?:Mio|mil|M|k|B|ISK|million|billion)?(?:\s+ISK)?/i
+
+  // Scan full wikitext for standalone loot/bounty/salvage lines (not inside section headers)
+  // Handles: "Bounties: ~254,000 ISK", "Loot : 5.2M", "Salvage: ~3 Mio ISK", "Loot:'''10mil'''"
+  const standaloneLootRe = /^[ \t]*(?:Total\s+)?([Bb]ounti?(?:es?|y)?|[Ll]oot(?:\s*&\s*[Ss]alvage)?|[Ss]alvage|[Tt]ags?)\s*:\s*(.+)$/gm
+  let slm
+  while ((slm = standaloneLootRe.exec(wikitext)) !== null) {
+    const key = slm[1].trim().toLowerCase()
+    const rawVal = cleanVal(slm[2])
+    // Value must START with a number, ~, ±, ≈, or About/Approximately N — reject prose
+    if (!/^[~±≈<>]?[\d]|^[Aa](?:bout|pproximately)\s+[\d~≈]/.test(rawVal)) continue
+    const valM = rawVal.match(/[~±≈<>]?[\d,.]+\s*(?:[-–]\s*[\d,.]+\s*)?(?:Mio|mil|M|k|B|ISK|million|billion)?(?:\s+ISK)?/i)
+    const val = valM ? valM[0].trim() : null
+    if (!val) continue
+    if (/bounti?(?:es?|y)?/.test(key))                            result.bounty  = result.bounty  || val
+    else if (/loot\s*&\s*salvage|loot and salvage/.test(key)) { result.loot = result.loot || val; result.salvage = result.salvage || val }
+    else if (/^loot/.test(key))                                result.loot    = result.loot    || val
+    else if (/salvage/.test(key))                              result.salvage = result.salvage || val
+    else if (/tag/.test(key))                                  result.tags    = result.tags    || val
+  }
+
+  // Reversed format: "~6.8M Bounty" / "~0.7M Salvage" (value first, keyword after)
+  const reversedRe = /^[ \t]*([~±<>]?[\d,.]+\s*(?:[-–][\d,.]+\s*)?(?:Mio|mil|M|k|B|million|billion)?(?:\s+ISK)?)\s+(Bounti?(?:es?|y)?|Loot(?:\s*&\s*Salvage)?|Salvage|Tags?)\b/gim
+  let rm2
+  while ((rm2 = reversedRe.exec(wikitext)) !== null) {
+    const val = rm2[1].trim(), key = rm2[2].trim().toLowerCase()
+    if (/bounti?(?:es?|y)?/.test(key))                            result.bounty  = result.bounty  || val
+    else if (/loot\s*&\s*salvage/.test(key))                  { result.loot = result.loot || val; result.salvage = result.salvage || val }
+    else if (/^loot/.test(key))                                result.loot    = result.loot    || val
+    else if (/salvage/.test(key))                              result.salvage = result.salvage || val
+    else if (/tag/.test(key))                                  result.tags    = result.tags    || val
+  }
+
+  // |Rewards= field containing loot/salvage/bounty text (not ISK+LP agent reward format)
+  const rewardsM = wikitext.match(/\|Rewards\s*=\s*([^\n|{}]{5,})/i)
+  if (rewardsM) {
+    const rv = cleanVal(rewardsM[1])
+    // Skip pure agent reward format: "NNN ISK + NNN LP + ..."
+    if (/\d/.test(rv) && !/ISK\s*\+\s*\d.*LP/i.test(rv)) {
+      // Try to extract bounty/loot/salvage/tags values from prose
+      const bM = rv.match(/([~<>]?[\d,.]+\s*(?:k|M|mil|million|B|Mio)?(?:\s+ISK)?)\s*(?:in\s+)?(?:bounti?e?s?)/i)
+      const lM = rv.match(/([~<>]?[\d,.]+\s*(?:k|M|mil|million|B|Mio)?(?:\s+ISK)?)\s*(?:in\s+)?(?:loot)/i)
+      const sM = rv.match(/([~<>]?[\d,.]+\s*(?:k|M|mil|million|B|Mio)?(?:\s+ISK)?)\s*(?:in\s+)?(?:salvage)/i)
+      const tM = rv.match(/([~<>]?[\d,.\-]+\s*(?:k|M|mil|million|B|Mio)?(?:\s+ISK)?)\s*(?:in\s+)?(?:tags?)/i)
+      if (bM) result.bounty  = result.bounty  || bM[1].trim()
+      if (lM) result.loot    = result.loot    || lM[1].trim()
+      if (sM) result.salvage = result.salvage || sM[1].trim()
+      if (tM) result.tags    = result.tags    || tM[1].trim()
+      // If no structured values but has loot keywords and numbers, store as items note
+      if (!bM && !lM && !sM && !tM && /loot|salvage|bounty|tag/i.test(rv) && /\d/.test(rv)) {
+        result.items.push(rv.slice(0, 150))
+      }
+    }
+  }
+
+  // NotableLoot template fields: | NotableLoot1 = Item Name
+  const notableLootRe = /\|\s*NotableLoot\d*\s*=\s*([^\n|{}]{3,})/gi
+  let nlm
+  while ((nlm = notableLootRe.exec(wikitext)) !== null) {
+    const item = stripWiki(nlm[1]).trim()
+    if (item.length > 2 && item.length < 120) result.items.push(item)
+  }
+
+  // Tags:<br> with items either on next line or same line after <br>
+  // e.g. "Tags:'''<br>Item x5, Item x7" OR "Tags:<br>\nItem x5, Item x7"
+  const tagsBrRe = /[Tt]ags?[^:\n]*:\s*(?:'{0,3})?(?:<br\s*\/?>\s*(?:'{0,3})?)(?:\n)?([^\n{|]{10,})/g
+  let tbm
+  while ((tbm = tagsBrRe.exec(wikitext)) !== null) {
+    const line = tbm[1]
+    // Parse comma-separated "ItemName xN" entries
+    const entries = line.split(',').map(e => e.trim()).filter(Boolean)
+    for (const entry of entries) {
+      const qM = entry.match(/^(.+?)\s+x(\d+)\s*$/i)
+      if (qM) {
+        const name = stripWiki(qM[1]).trim(), qty = parseInt(qM[2])
+        if (name.length > 2 && name.length < 100) result.items.push(qty > 1 ? `${name} ×${qty}` : name)
+      } else {
+        const clean = stripWiki(entry).trim()
+        if (clean.length > 2 && clean.length < 100 && /[A-Z]/.test(clean)) result.items.push(clean)
+      }
+    }
+  }
+
+  // Dash-bullet keyword-first: "- Bounties from the rats are approximately 20 mil"
+  const dashBulletRe = /^-\s*(Bounti?(?:es?|y)?|Loot|Salvage|Tags?)[^.\n]*?([~≈±]?[\d,.]+\s*(?:mil|M|k|B|million|billion))\b/gim
+  let dbm
+  while ((dbm = dashBulletRe.exec(wikitext)) !== null) {
+    const key = dbm[1].trim().toLowerCase(), val = dbm[2].trim()
+    if (/bounti?/.test(key))   result.bounty  = result.bounty  || val
+    else if (/loot/.test(key)) result.loot    = result.loot    || val
+    else if (/salv/.test(key)) result.salvage = result.salvage || val
+    else if (/tag/.test(key))  result.tags    = result.tags    || val
+  }
+
+  // Prose-embedded: "approximately 20 mil in bounties", "get 20mil in bounties", etc.
+  // Only fire when field is still unset — avoids overwriting cleaner values
+  const proseRe = /([~≈±]?[\d,.]+\s*(?:mil|M|k|B|million|billion))\s+in\s+(bounti?(?:es?|y)?|loot|salvage|tags?)/gi
+  let pm
+  while ((pm = proseRe.exec(wikitext)) !== null) {
+    const val = pm[1].trim(), key = pm[2].trim().toLowerCase()
+    if (/bounti?/.test(key))   result.bounty  = result.bounty  || val
+    else if (/loot/.test(key)) result.loot    = result.loot    || val
+    else if (/salv/.test(key)) result.salvage = result.salvage || val
+    else if (/tag/.test(key))  result.tags    = result.tags    || val
+  }
+
+  // Now bail if no section body AND no values found at all
+  if (!allBody.trim() && !result.bounty && !result.loot && !result.salvage && !result.tags && !result.items.length) return null
+
+  const lines = allBody.split('\n')
+  for (const line of lines) {
+    const isBullet = /^[\s*#]+/.test(line)
+
+    // Handle "7x Item Name" / " 26x Item" / "* Imperial Navy Colonel I x 34" quantity formats
+    const qtyM = line.match(/^[\s*#]*(\d+)\s*x\s+(.+)$/i) ||
+                 line.match(/^[\s*#]*(.+?)\s+x\s+(\d+)\s*$/i)
+    if (qtyM) {
+      // Determine which group is qty and which is name
+      const [, a, b] = qtyM
+      const isFirstQty = /^\d+$/.test(a)
+      const qty = isFirstQty ? parseInt(a) : parseInt(b)
+      const name = stripWiki(isFirstQty ? b : a).replace(/<br\s*\/?>/gi, '').trim()
+      if (name.length > 2 && name.length < 100 && qty > 0) {
+        result.items.push(qty > 1 ? `${name} ×${qty}` : name)
+      }
+      continue
+    }
+
+    const clean = cleanVal(line.replace(/^\*+\s*/, '').replace(/<br\s*\/?>/gi, ''))
+    if (!clean.trim()) continue
+
+    // "Key: value" patterns (Bounty, Loot, Salvage, Tags, Insignias, Normal loot, etc.)
+    const kvM = clean.match(/^([A-Za-z][^:]{0,30}):\s*(.+)$/)
+    if (kvM) {
+      const key = kvM[1].trim().toLowerCase()
+      const val = cleanVal(kvM[2]).replace(/\s{2,}/g, ' ').trim()
+      if (/bounti?(?:es?|y)?/.test(key))                       result.bounty  = val
+      else if (/loot\s*&\s*salvage|loot and salvage/.test(key)) { result.loot = val; result.salvage = val }
+      else if (/^loot|normal loot/.test(key))               result.loot    = val
+      else if (/salvage/.test(key))                          result.salvage = val
+      else if (/tag|insignia|faction/.test(key))             result.tags    = val
+      // preserve other named values (e.g. "Insingnias: 8.95m ISK") as items text
+      else if (ISK_VAL.test(val)) result.items.push(`${kvM[1].trim()}: ${val}`)
+      continue
+    }
+
+    // "500,000 EST. Value (Bounty)" style
+    const parenM = clean.match(/^([\d,~]+\s*[\w\s.]+?)\s*\(([^)]+)\)\s*$/)
+    if (parenM) {
+      const label = parenM[2].trim().toLowerCase()
+      const val = parenM[1].trim()
+      if (/bounty/.test(label))  result.bounty  = result.bounty  || val
+      else if (/loot/.test(label))    result.loot    = result.loot    || val
+      else if (/salvage/.test(label)) result.salvage = result.salvage || val
+      else if (/tag/.test(label))     result.tags    = result.tags    || val
+      continue
+    }
+
+    // Plain prose ISK lines (e.g. "Salvage: ± 1.7 Mil ISK" already caught above; catch remainder)
+    if (ISK_VAL.test(clean) && clean.length < 200) {
+      result.items.push(stripWiki(clean).trim())
+    } else if (isBullet && /[A-Z]/.test(clean) && clean.length > 4 && clean.length < 100 && !clean.includes('=')) {
+      // Plain bullet item with no qty/ISK — likely a tag or loot item name
+      result.items.push(stripWiki(clean).trim())
+    }
+  }
+
+  // Parse wikitables: split each row on || and extract item + optional qty/value
+  // Handles both "| ItemName || qty" and "| Date | Source | ItemName | ISK" formats
+  // Split allBody into table sections to process row-by-row
+  const tableRe = /{\|([\s\S]*?)\|}/g
+  let tm
+  while ((tm = tableRe.exec(allBody)) !== null) {
+    const tableBody = tm[1]
+    // Split into rows on |- boundaries
+    const rows = tableBody.split(/^\|-[^\n]*/m)
+    for (const row of rows) {
+      // Extract cells: lines starting with | (but not |+ or |-)
+      const cells = row.split('\n')
+        .filter(l => /^\|[^|!+\-]/.test(l))
+        .map(l => {
+          // Handle inline || separators within a single line
+          const parts = l.replace(/^\|\s*/, '').split(/\s*\|\|\s*/)
+          return parts.map(p => stripWiki(p.replace(/style="[^"]*"/g, '').replace(/rowspan=\s*["']?\d+["']?/g, '')).trim())
+        })
+        .flat()
+        .filter(c => c.length > 0)
+
+      if (cells.length === 0) continue
+
+      // Identify item-like cells: not a pure date, not a pure number, not "Pocket N - ..."
+      const itemCells = cells.filter(c =>
+        c.length > 3 && c.length < 120 &&
+        !/^\d{4}[/\-]/.test(c) &&       // skip dates
+        !/^Pocket\s+\d/i.test(c) &&      // skip pocket refs
+        !/^\d{1,3}(,\d{3})*$/.test(c)    // skip plain numbers
+      )
+
+      // ISK-value cells: pure numbers (item est. value)
+      const iskCells = cells.filter(c => /^\d{1,3}(,\d{3})+$/.test(c))
+
+      for (let ci = 0; ci < itemCells.length; ci++) {
+        const item = itemCells[ci]
+        // Check if there's a corresponding ISK value
+        const iskVal = iskCells[ci]
+        if (iskVal) {
+          const isk = parseInt(iskVal.replace(/,/g, ''))
+          result.items.push(`${item} (~${isk >= 1000000 ? (isk/1000000).toFixed(1)+'M' : (isk/1000).toFixed(0)+'k'} ISK)`)
+        } else {
+          // Check for qty: small number in next cell
+          const nextC = cells[cells.indexOf(item) + 1]
+          const qty = nextC && /^\d+$/.test(nextC) ? parseInt(nextC) : null
+          result.items.push(qty && qty > 1 ? `${item} ×${qty}` : item)
+        }
+      }
+    }
+  }
+
+  // Deduplicate items and filter junk (raw wiki markup lines, URLs, empty, too short)
+  result.items = [...new Set(result.items)].filter(i =>
+    i.length > 3 && i.length < 200 &&
+    !/^[{|!<]/.test(i) &&                  // skip raw wiki/html syntax
+    !/rowspan|colspan|style=/i.test(i) &&
+    !/^\d{4}[/\-]/.test(i) &&             // skip bare dates
+    !/https?:[\s/]/i.test(i) &&           // skip URLs (incl. space-mangled ones)
+    !/<!--/.test(i) &&                    // skip html comments
+    !/^={2,}/.test(i) &&                  // skip leaked section headers
+    !/^(Besides|Note:|This mission)/.test(i)  // skip narrative prose
+  )
+
+  const hasData = result.bounty || result.loot || result.salvage || result.tags || result.items.length > 0
+  if (!hasData) return null
+  return result
+}
+
 function parseMissionPage(wikitext, listLevel) {
   if (!wikitext) return null
 
@@ -286,6 +541,7 @@ function parseMissionPage(wikitext, listLevel) {
 
   const pockets = parsePockets(wikitext)
   const blitz = parseBlitz(wikitext)
+  const loot = parseLoot(wikitext)
 
   return {
     level,
@@ -300,6 +556,7 @@ function parseMissionPage(wikitext, listLevel) {
     briefing,
     pockets,
     blitz,
+    loot,
   }
 }
 

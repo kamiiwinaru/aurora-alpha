@@ -3,6 +3,7 @@ import { motion, AnimatePresence } from 'framer-motion'
 import { RefreshCw, Factory, Truck, AlertTriangle, ArrowRight, FlaskConical, CheckCircle2, XCircle, Search, X, ShoppingCart, Zap, Wrench, ChevronDown, ChevronRight as ChevronRightIcon, Copy, Check, Download, TrendingUp, TrendingDown, Minus, Upload } from 'lucide-react'
 import type { EveIndustryJob, EveSkill, EveAsset, EveCharacter } from '../../types'
 import { timeUntil, formatISK } from '../../lib/eve-esi'
+import ExcelJS from 'exceljs'
 
 interface BlueprintImport {
   typeId: number
@@ -397,24 +398,33 @@ interface FlatStep {
   typeId: number
   name: string
   qtyNeeded: number
+  qtyPerRun: number
   runsNeeded: number
   activity: 'manufacturing' | 'reaction'
   timePerRun: number
+  bpTypeId?: number
   inputs: Array<{ typeId: number; name: string; qty: number; source: 'buy' | 'manufacture' | 'react' }>
 }
 
+interface FinalStep {
+  name: string
+  productTypeId: number | null
+  runs: number
+  qtyPerRun: number
+  timePerRun?: number  // seconds per run (from BlueprintData.adjustedTime)
+}
+
 function flattenChainToSteps(chain: ChainNode[]): FlatStep[] {
-  // Post-order traversal: children (dependencies) before parents
-  const seen = new Map<number, FlatStep>()
+  const seen = new Map<number, FlatStep & { _qtyPerRun: number }>()
   const order: number[] = []
 
   function visit(node: ChainNode) {
     for (const child of node.materials) visit(child)
     if (node.activity === 'raw') return
     if (seen.has(node.typeId)) {
-      // Aggregate quantity if same item needed multiple places
-      seen.get(node.typeId)!.qtyNeeded += node.qtyNeeded
-      seen.get(node.typeId)!.runsNeeded = Math.ceil(seen.get(node.typeId)!.qtyNeeded / Math.max(1, node.qtyPerRun))
+      const ex = seen.get(node.typeId)!
+      ex.qtyNeeded += node.qtyNeeded
+      ex.runsNeeded = Math.ceil(ex.qtyNeeded / Math.max(1, ex._qtyPerRun))
       return
     }
     order.push(node.typeId)
@@ -423,9 +433,12 @@ function flattenChainToSteps(chain: ChainNode[]): FlatStep[] {
       typeId: node.typeId,
       name: node.name,
       qtyNeeded: node.qtyNeeded,
+      qtyPerRun: node.qtyPerRun,
+      _qtyPerRun: node.qtyPerRun,
       runsNeeded: node.runsNeeded,
       activity: node.activity,
       timePerRun: node.timePerRun,
+      bpTypeId: node.bpTypeId,
       inputs: node.materials.map(m => ({
         typeId: m.typeId,
         name: m.name,
@@ -438,10 +451,65 @@ function flattenChainToSteps(chain: ChainNode[]): FlatStep[] {
   return order.map(id => seen.get(id)!).filter(Boolean)
 }
 
+// ── Cascade inventory adjustments through the chain ─────────────────────────
+// Process steps in reverse topological order (parents before their inputs).
+// When a step can be partially or fully skipped due to inventory, propagate
+// the reduction to its inputs so downstream demand is accurate.
+function computeAdjustedChain(
+  steps: FlatStep[],
+  buyList: BuyItem[],
+  clientAssetMap: Map<number, number>,
+  overrideSet?: Set<number>
+): {
+  stepAdj: Map<number, { have: number; adjQty: number; adjRuns: number }>
+  buyAdj:  Map<number, { have: number; adjQty: number }>
+} {
+  // Mutable needed-qty map covering both intermediate steps and raw buy items
+  const qtyMap = new Map<number, number>()
+  for (const s of steps)  qtyMap.set(s.typeId, s.qtyNeeded)
+  for (const b of buyList) qtyMap.set(b.typeId, b.qty)
+
+  const stepAdj = new Map<number, { have: number; adjQty: number; adjRuns: number }>()
+
+  // Reverse order = parents before their dependencies, so savings propagate down
+  for (let i = steps.length - 1; i >= 0; i--) {
+    const step = steps[i]
+    // If the user overrides this step, treat inventory as 0 — force full production
+    const haveRaw  = clientAssetMap.get(step.typeId) ?? 0
+    const have     = overrideSet?.has(step.typeId) ? 0 : haveRaw
+    const curQty   = qtyMap.get(step.typeId) ?? step.qtyNeeded
+    const adjQty   = Math.max(0, curQty - have)
+    const adjRuns  = adjQty > 0 ? Math.ceil(adjQty / Math.max(1, step.qtyPerRun)) : 0
+    stepAdj.set(step.typeId, { have: haveRaw, adjQty, adjRuns })
+
+    // Propagate run savings to every input (buy AND manufactured/reacted)
+    const savedRuns = step.runsNeeded - adjRuns
+    if (savedRuns > 0) {
+      for (const inp of step.inputs) {
+        const qtyPerRun = inp.qty / Math.max(1, step.runsNeeded)
+        const saved     = savedRuns * qtyPerRun
+        qtyMap.set(inp.typeId, Math.max(0, (qtyMap.get(inp.typeId) ?? 0) - saved))
+      }
+    }
+  }
+
+  const buyAdj = new Map<number, { have: number; adjQty: number }>()
+  for (const b of buyList) {
+    const adjQty = Math.max(0, Math.round(qtyMap.get(b.typeId) ?? b.qty))
+    // Use client-side inventory for raw materials if available (fresher than server cache)
+    const have   = clientAssetMap.get(b.typeId) ?? b.have
+    buyAdj.set(b.typeId, { have, adjQty: Math.max(0, adjQty - have) })
+  }
+
+  return { stepAdj, buyAdj }
+}
+
 // ── Detailed Steps Popout ────────────────────────────────────────────────────
 function StepsPopout({
   blueprint, chainData, chainLoading, chainError,
-  mfgStructure, mfgRig, rxStructure, rxRig, security, system, onClose,
+  mfgStructure, mfgRig, rxStructure, rxRig, security, system,
+  clientAssetMap, ownedBpTypeIds, exportName, finalSteps,
+  onClose,
 }: {
   blueprint: BlueprintImport
   chainData: ChainData | null
@@ -453,12 +521,26 @@ function StepsPopout({
   rxRig: string
   security: string
   system: string
+  clientAssetMap?: Map<number, number>
+  ownedBpTypeIds?: Set<number>
+  exportName?: string
+  finalSteps?: FinalStep[]
   onClose: () => void
 }) {
   const [pos, setPos] = useState({ x: 60, y: 60 })
   const dragging = useRef(false)
   const dragOffset = useRef({ x: 0, y: 0 })
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>({})
+  const [overrideSet, setOverrideSet] = useState<Set<number>>(new Set())
+
+  const toggleOverride = (typeId: number) => {
+    setOverrideSet(prev => {
+      const next = new Set(prev)
+      if (next.has(typeId)) next.delete(typeId)
+      else next.add(typeId)
+      return next
+    })
+  }
 
   const onMouseDown = (e: React.MouseEvent<HTMLDivElement>) => {
     dragging.current = true
@@ -489,42 +571,333 @@ function StepsPopout({
   const mfgIntermediates = manufacturing.filter(s => reactionInputIds.has(s.typeId))
   const mfgFinal         = manufacturing.filter(s => !reactionInputIds.has(s.typeId))
 
-  const exportCSV = () => {
+  // Cascaded inventory adjustment — if you have an intermediate, its inputs are also reduced
+  const adjusted = useMemo(() => {
+    if (!chainData || !clientAssetMap) return null
+    return computeAdjustedChain(steps, chainData.buyList, clientAssetMap, overrideSet)
+  }, [steps, chainData, clientAssetMap, overrideSet])
+
+  const exportXLSX = async () => {
     if (!chainData) return
-    const esc = (v: string | number) => `"${String(v).replace(/"/g, '""')}"`
-    const rows: string[] = []
 
-    rows.push('SECTION,NAME,QTY NEEDED,QTY HAVE,QTY TO BUY,RUNS,TIME (s),ACTIVITY,INPUT NAME,INPUT QTY,INPUT SOURCE')
+    const wb = new ExcelJS.Workbook()
+    wb.creator = 'Aurora'
+    wb.created = new Date()
+    const ws = wb.addWorksheet('Build Chain', { views: [{ state: 'frozen', ySplit: 3 }] })
 
-    for (const item of chainData.buyList) {
-      rows.push([esc('Materials'), esc(item.name), item.qty, item.have, Math.max(0, item.qty - item.have), '', '', '', '', '', ''].join(','))
+    // ── Column definitions ───────────────────────────────────────────
+    ws.columns = [
+      { key: 'name',    width: 38 },
+      { key: 'qty',     width: 14 },
+      { key: 'have',    width: 12 },
+      { key: 'adjQty',  width: 14 },
+      { key: 'adjRuns', width: 10 },
+      { key: 'time',    width: 14 },
+      { key: 'source',  width: 10 },
+      { key: 'status',  width: 28 },
+    ]
+
+    // ── Color palette ────────────────────────────────────────────────
+    const C = {
+      bg:         'FF0A0E14',
+      panelBg:    'FF0D1117',
+      white:      'FFFFFFFF',
+      cyan:       'FF00D4FF',
+      cyanDark:   'FF003A44',
+      green:      'FF39C96E',
+      greenDark:  'FF003318',
+      purple:     'FFC084FC',
+      purpleDark: 'FF1E0D35',
+      gold:       'FFFFC040',
+      goldDark:   'FF302000',
+      orange:     'FFFFA040',
+      orangeDark: 'FF3A1800',
+      red:        'FFFF4040',
+      muted:      'FFB8944A',
+      dim:        'FF606060',
+      border:     'FF1E2A38',
+      rowAlt:     'FF0D1520',
     }
 
-    const csvSection = (step: FlatStep, label: string) => {
-      const totalTime = step.timePerRun * step.runsNeeded
-      if (step.inputs.length === 0) {
-        rows.push([esc(label), esc(step.name), step.qtyNeeded, '', '', step.runsNeeded, totalTime, esc(step.activity), '', '', ''].join(','))
-      } else {
-        step.inputs.forEach((inp, i) => {
-          if (i === 0) {
-            rows.push([esc(label), esc(step.name), step.qtyNeeded, '', '', step.runsNeeded, totalTime, esc(step.activity), esc(inp.name), inp.qty, esc(inp.source)].join(','))
-          } else {
-            rows.push(['', '', '', '', '', '', '', '', esc(inp.name), inp.qty, esc(inp.source)].join(','))
-          }
+    type ARGB = string
+    const fill   = (argb: ARGB): ExcelJS.Fill => ({ type: 'pattern', pattern: 'solid', fgColor: { argb } })
+    const border = (): Partial<ExcelJS.Borders> => ({
+      bottom: { style: 'thin', color: { argb: C.border } },
+    })
+    const font = (argb: ARGB, bold = false, sz = 10): Partial<ExcelJS.Font> => ({ color: { argb }, bold, size: sz, name: 'Consolas' })
+
+    // ── Helper: set a full row's fill + bottom border ────────────────
+    const styleRow = (row: ExcelJS.Row, fillArgb: ARGB, fontArgb = C.white, bold = false, sz = 10) => {
+      row.eachCell({ includeEmpty: true }, cell => {
+        cell.fill  = fill(fillArgb)
+        cell.font  = font(fontArgb, bold, sz)
+        cell.border = border()
+        cell.alignment = { vertical: 'middle', wrapText: false }
+      })
+    }
+
+    // ── Helper: merge + write a section header ───────────────────────
+    const sectionHeader = (label: string, bgArgb: ARGB, fgArgb: ARGB) => {
+      const r = ws.addRow(['', '', '', '', '', '', '', ''])
+      ws.mergeCells(r.number, 1, r.number, 8)
+      const cell = ws.getCell(r.number, 1)
+      cell.value = label
+      cell.fill  = fill(bgArgb)
+      cell.font  = font(fgArgb, true, 11)
+      cell.alignment = { vertical: 'middle', horizontal: 'left', indent: 1 }
+      cell.border = { bottom: { style: 'medium', color: { argb: fgArgb } } }
+      r.height = 18
+    }
+
+    // ── Helper: column header row ────────────────────────────────────
+    const colHeaders = (labels: string[], bgArgb: ARGB, fgArgb: ARGB) => {
+      const r = ws.addRow(labels)
+      r.height = 15
+      r.eachCell({ includeEmpty: true }, (cell, col) => {
+        cell.fill  = fill(bgArgb)
+        cell.font  = font(fgArgb, true, 9)
+        cell.border = { bottom: { style: 'thin', color: { argb: fgArgb } } }
+        cell.alignment = { vertical: 'middle', horizontal: col === 1 ? 'left' : 'right', indent: col === 1 ? 1 : 0 }
+      })
+    }
+
+    // ── Helper: add a BP alert row (spans all 8 cols) ────────────────
+    const bpAlertRow = (isT2: boolean) => {
+      const bgArgb = isT2 ? C.goldDark  : C.orangeDark
+      const fgArgb = isT2 ? C.gold      : C.orange
+      const icon   = isT2 ? '⚡ INVENTION REQUIRED' : '⚠  BLUEPRINT REQUIRED'
+      const note   = isT2
+        ? 'T2 blueprints cannot be purchased — run an Invention job from a T1 BPC to produce a limited-run T2 BPC.'
+        : 'Obtain a BPC from your corp library, or purchase a BPO/BPC on the market or contracts.'
+      const r = ws.addRow(['', '', '', '', '', '', '', ''])
+      ws.mergeCells(r.number, 1, r.number, 3)
+      ws.mergeCells(r.number, 4, r.number, 8)
+      const hCell = ws.getCell(r.number, 1)
+      const nCell = ws.getCell(r.number, 4)
+      hCell.value = icon
+      nCell.value = note
+      ;[hCell, nCell].forEach(c => {
+        c.fill      = fill(bgArgb)
+        c.border    = { top: { style: 'thin', color: { argb: fgArgb } }, bottom: { style: 'thin', color: { argb: fgArgb } } }
+        c.alignment = { vertical: 'middle', wrapText: true, indent: 1 }
+      })
+      hCell.font = font(fgArgb, true, 9)
+      nCell.font = font(C.muted, false, 9)
+      r.height = 28
+    }
+
+    // ── Helper: write one production step + its inputs ───────────────
+    const stepRows = (step: FlatStep, fgArgb: ARGB, rowBg: ARGB, altBg: ARGB) => {
+      const adj      = adjusted?.stepAdj.get(step.typeId)
+      const have     = adj?.have    ?? 0
+      const adjQty   = adj?.adjQty  ?? step.qtyNeeded
+      const adjRuns  = adj?.adjRuns ?? step.runsNeeded
+      const allDone  = adjQty === 0
+      const noBp     = step.bpTypeId != null && ownedBpTypeIds != null && ownedBpTypeIds.size > 0 && !ownedBpTypeIds.has(step.bpTypeId)
+      const isT2     = noBp && step.activity === 'manufacturing' && / II$/.test(step.name)
+
+      const status = allDone ? '✓ In inventory — skip' : noBp ? (isT2 ? 'Needs invention' : 'Blueprint required') : ''
+
+      const r = ws.addRow([
+        step.name,
+        step.qtyNeeded,
+        have || '',
+        allDone ? '' : adjQty,
+        allDone ? '' : adjRuns,
+        allDone ? '' : formatTime(step.timePerRun * adjRuns),
+        '',
+        status,
+      ])
+      r.height = 14
+      const rowFill = fill(rowBg)
+      r.eachCell({ includeEmpty: true }, (cell, col) => {
+        cell.fill      = rowFill
+        cell.border    = border()
+        cell.alignment = { vertical: 'middle', horizontal: col === 1 ? 'left' : 'right', indent: col === 1 ? 1 : 0 }
+      })
+      // Name cell colour
+      const nameCell = r.getCell(1)
+      nameCell.font = font(allDone ? C.dim : fgArgb, true, 10)
+      // Qty cells
+      ;[2,3,4,5,6].forEach(c => { r.getCell(c).font = font(allDone ? C.dim : C.muted, false, 9) })
+      // Status cell
+      const sCell = r.getCell(8)
+      if (allDone)  sCell.font = font(C.green, false, 9)
+      else if (noBp) sCell.font = font(isT2 ? C.gold : C.orange, false, 9)
+      else           sCell.font = font(C.dim, false, 9)
+
+      if (noBp) bpAlertRow(isT2)
+
+      // Input sub-rows
+      step.inputs.forEach((inp, idx) => {
+        const ir = ws.addRow([
+          `  └  ${inp.name}`,
+          inp.qty,
+          '', '', '', '',
+          inp.source.toUpperCase(),
+          '',
+        ])
+        ir.height = 13
+        const iBg = fill(idx % 2 === 0 ? altBg : rowBg)
+        ir.eachCell({ includeEmpty: true }, (cell, col) => {
+          cell.fill      = iBg
+          cell.border    = { bottom: { style: 'hair', color: { argb: C.border } } }
+          cell.alignment = { vertical: 'middle', horizontal: col === 1 ? 'left' : 'right' }
+          cell.font      = font(C.dim, false, 9)
         })
-      }
+        const srcCell = ir.getCell(7)
+        srcCell.font = font(
+          inp.source === 'buy' ? C.muted : inp.source === 'react' ? C.green : C.cyan,
+          false, 8
+        )
+      })
     }
 
-    for (const step of mfgIntermediates) csvSection(step, 'Mfg Intermediates')
-    for (const step of simpleReactions)  csvSection(step, 'Simple Reactions')
-    for (const step of advReactions)     csvSection(step, 'Advanced Reactions')
-    for (const step of mfgFinal)         csvSection(step, 'Manufacturing')
+    // ════════════════════════════════════════════════════════════════
+    // TITLE ROW
+    // ════════════════════════════════════════════════════════════════
+    ws.mergeCells(1, 1, 1, 8)
+    const titleCell = ws.getCell(1, 1)
+    titleCell.value = `${exportName ?? chainData.productName}  —  Build Chain`
+    titleCell.fill  = fill(C.bg)
+    titleCell.font  = font(C.cyan, true, 13)
+    titleCell.alignment = { vertical: 'middle', horizontal: 'left', indent: 1 }
+    titleCell.border = { bottom: { style: 'medium', color: { argb: C.cyan } } }
+    ws.getRow(1).height = 24
 
-    const blob = new Blob([rows.join('\n')], { type: 'text/csv' })
-    const url = URL.createObjectURL(blob)
-    const a = document.createElement('a')
-    a.href = url
-    a.download = `${chainData.productName.replace(/[^a-z0-9]/gi, '_')}_build_chain.csv`
+    // META ROW
+    ws.mergeCells(2, 1, 2, 8)
+    const metaCell = ws.getCell(2, 1)
+    const rxLabel  = REACTION_STRUCTURES.find(s => s.key === rxStructure)?.label ?? rxStructure
+    metaCell.value = [
+      `Structure: ${mfgStructLabel}`,
+      security ? `Security: ${security}` : null,
+      system   ? `System: ${system}` : null,
+      (simpleReactions.length + advReactions.length) > 0 ? `Reaction Structure: ${rxLabel}` : null,
+      `Generated: ${new Date().toLocaleString()}`,
+    ].filter(Boolean).join('   ·   ')
+    metaCell.fill  = fill(C.panelBg)
+    metaCell.font  = font(C.muted, false, 9)
+    metaCell.alignment = { vertical: 'middle', horizontal: 'left', indent: 1 }
+    metaCell.border = { bottom: { style: 'thin', color: { argb: C.border } } }
+    ws.getRow(2).height = 16
+
+    // Spacer
+    const spacer = () => {
+      const r = ws.addRow([''])
+      r.height = 6
+      r.eachCell({ includeEmpty: true }, c => { c.fill = fill(C.bg) })
+    }
+    spacer()
+
+    // ════════════════════════════════════════════════════════════════
+    // RAW MATERIALS
+    // ════════════════════════════════════════════════════════════════
+    if (chainData.buyList.length > 0) {
+      sectionHeader('  RAW MATERIALS', C.panelBg, C.muted)
+      colHeaders(['Item', 'Qty Needed', 'Have', 'Qty to Buy', '', '', '', 'Status'], C.bg, C.dim)
+      chainData.buyList.forEach((item, idx) => {
+        const adj    = adjusted?.buyAdj.get(item.typeId)
+        const have   = adj?.have   ?? item.have
+        const adjQty = adj?.adjQty ?? Math.max(0, item.qty - item.have)
+        const covered = adjQty === 0
+        const r = ws.addRow([
+          item.name,
+          item.qty,
+          have || '',
+          covered ? '' : adjQty,
+          '', '', '',
+          covered ? '✓ Covered' : '',
+        ])
+        r.height = 14
+        const bg = fill(idx % 2 === 0 ? C.panelBg : C.rowAlt)
+        r.eachCell({ includeEmpty: true }, (cell, col) => {
+          cell.fill      = bg
+          cell.border    = border()
+          cell.alignment = { vertical: 'middle', horizontal: col === 1 ? 'left' : 'right', indent: col === 1 ? 1 : 0 }
+          cell.font      = font(col === 1 ? C.white : C.muted, false, 10)
+        })
+        if (covered) r.getCell(8).font = font(C.green, false, 9)
+        else if (adjQty > 0) r.getCell(4).font = font(C.orange, true, 10)
+      })
+      spacer()
+    }
+
+    // ════════════════════════════════════════════════════════════════
+    // PRODUCTION SECTIONS
+    // ════════════════════════════════════════════════════════════════
+    const prodColHeaders = (bg: ARGB, fg: ARGB) =>
+      colHeaders(['Item', 'Qty Needed', 'Have', 'Adj Qty', 'Runs', 'Time', 'Source', 'Status'], bg, fg)
+
+    if (mfgIntermediates.length > 0) {
+      sectionHeader('  MFG INTERMEDIATES', C.cyanDark, C.cyan)
+      prodColHeaders(C.bg, C.dim)
+      mfgIntermediates.forEach(s => stepRows(s, C.cyan, C.panelBg, C.rowAlt))
+      spacer()
+    }
+
+    if (simpleReactions.length > 0) {
+      sectionHeader(`  REACTIONS  ·  ${rxLabel}`, C.greenDark, C.green)
+      prodColHeaders(C.bg, C.dim)
+      simpleReactions.forEach(s => stepRows(s, C.green, C.panelBg, C.rowAlt))
+      spacer()
+    }
+
+    if (advReactions.length > 0) {
+      sectionHeader(`  ADVANCED REACTIONS  ·  ${rxLabel}`, C.purpleDark, C.purple)
+      prodColHeaders(C.bg, C.dim)
+      advReactions.forEach(s => stepRows(s, C.purple, C.panelBg, C.rowAlt))
+      spacer()
+    }
+
+    if (mfgFinal.length > 0) {
+      sectionHeader(`  MANUFACTURING  ·  ${mfgStructLabel}`, C.cyanDark, C.cyan)
+      prodColHeaders(C.bg, C.dim)
+      mfgFinal.forEach(s => stepRows(s, C.cyan, C.panelBg, C.rowAlt))
+      spacer()
+    }
+
+    // ════════════════════════════════════════════════════════════════
+    // FINAL ASSEMBLY
+    // ════════════════════════════════════════════════════════════════
+    if (finalSteps && finalSteps.length > 0) {
+      sectionHeader(`  FINAL ASSEMBLY  ·  ${mfgStructLabel}${system ? '  ·  ' + system : ''}`, C.goldDark, C.gold)
+      colHeaders(['Item', 'Qty to Build', 'Have', '', 'Runs', 'Time', '', 'Status'], C.bg, C.dim)
+      finalSteps.forEach((fs, idx) => {
+        const have      = fs.productTypeId != null ? (clientAssetMap?.get(fs.productTypeId) ?? 0) : 0
+        const totalQty  = fs.runs * fs.qtyPerRun
+        const adjRuns   = have >= totalQty ? 0 : Math.ceil((totalQty - have) / Math.max(1, fs.qtyPerRun))
+        const allDone   = have >= totalQty
+        const r = ws.addRow([
+          fs.name,
+          totalQty,
+          have || '',
+          '',
+          allDone ? '' : adjRuns,
+          allDone ? '' : (fs.timePerRun ? formatTime(fs.timePerRun * adjRuns) : ''),
+          '',
+          allDone ? '✓ In inventory — skip' : '',
+        ])
+        r.height = 16
+        const bg = fill(idx % 2 === 0 ? C.panelBg : C.rowAlt)
+        r.eachCell({ includeEmpty: true }, (cell, col) => {
+          cell.fill      = bg
+          cell.border    = border()
+          cell.alignment = { vertical: 'middle', horizontal: col === 1 ? 'left' : 'right', indent: col === 1 ? 1 : 0 }
+        })
+        r.getCell(1).font = font(allDone ? C.dim : C.gold, true, 11)
+        ;[2,3,5,6].forEach(c => { r.getCell(c).font = font(allDone ? C.dim : C.muted, false, 10) })
+        r.getCell(8).font = font(C.green, false, 9)
+      })
+    }
+
+    // ── Download ─────────────────────────────────────────────────────
+    const buffer = await wb.xlsx.writeBuffer()
+    const blob   = new Blob([buffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' })
+    const url    = URL.createObjectURL(blob)
+    const a      = document.createElement('a')
+    a.href       = url
+    a.download   = `${(exportName ?? chainData.productName).replace(/[^a-z0-9+]/gi, '_')}_build_chain.xlsx`
     a.click()
     URL.revokeObjectURL(url)
   }
@@ -546,6 +919,75 @@ function StepsPopout({
     </button>
   )
 
+  // Render a single step row using cascaded-adjusted quantities
+  const StepRow = ({ step, color, borderColor }: { step: FlatStep; color: string; borderColor: string }) => {
+    const adj        = adjusted?.stepAdj.get(step.typeId)
+    const have       = adj?.have    ?? (clientAssetMap?.get(step.typeId) ?? 0)
+    const adjRuns    = adj?.adjRuns ?? step.runsNeeded
+    const adjQty     = adj?.adjQty  ?? step.qtyNeeded
+    const isOverride = overrideSet.has(step.typeId)
+    const allCovered = adjQty === 0 && !isOverride
+    const noBp       = step.bpTypeId != null && ownedBpTypeIds != null && ownedBpTypeIds.size > 0 && !ownedBpTypeIds.has(step.bpTypeId)
+    const isT2       = noBp && step.activity === 'manufacturing' && / II$/.test(step.name)
+    return (
+      <div className={`pl-4 border-l ${borderColor}`}>
+        <div className="flex items-baseline justify-between gap-2">
+          <span className={`${color} font-mono`}>
+            {step.name} <span className="text-eve-muted">×{step.qtyNeeded.toLocaleString()}</span>
+            {noBp && <span className="text-[8px] text-eve-red border border-eve-red/40 px-1 py-px ml-1.5 align-middle">NO BP</span>}
+          </span>
+          <div className="flex items-center gap-2 shrink-0">
+            {have > 0 && !isOverride && (
+              <span className={`text-[9px] font-mono ${allCovered ? 'text-eve-green' : 'text-eve-orange'}`}>
+                {allCovered ? '✓ have' : `have ${have.toLocaleString()}`}
+              </span>
+            )}
+            {isOverride && have > 0 && (
+              <span className="text-[9px] font-mono text-eve-dim">have {have.toLocaleString()}</span>
+            )}
+            {allCovered
+              ? <button onClick={() => toggleOverride(step.typeId)} title="Make anyway (you have enough in inventory)" className="text-[9px] text-eve-green hover:text-eve-orange transition-colors cursor-pointer">skip ↺</button>
+              : isOverride
+                ? <button onClick={() => toggleOverride(step.typeId)} title="Cancel override — use inventory" className="text-[9px] text-eve-orange hover:text-eve-green transition-colors cursor-pointer">{adjRuns}r · {formatTime(step.timePerRun * adjRuns)} ✕</button>
+                : <span className="text-eve-dim text-[9px]">{adjRuns}r · {formatTime(step.timePerRun * adjRuns)}</span>}
+          </div>
+        </div>
+        {noBp && (
+          isT2 ? (
+            <div className="mt-1 ml-0 mr-2 px-2 py-1.5 border-l-2 border-eve-gold bg-eve-gold/5 flex flex-col gap-0.5">
+              <div className="flex items-center gap-1.5 text-[10px] text-eve-gold font-mono uppercase tracking-wide">
+                <Zap size={9} className="shrink-0" />
+                Invention required
+              </div>
+              <div className="text-[9px] text-eve-muted leading-relaxed">
+                T2 blueprints cannot be purchased — run an Invention job from a T1 BPC to produce a limited-run T2 BPC.
+              </div>
+            </div>
+          ) : (
+            <div className="mt-1 ml-0 mr-2 px-2 py-1.5 border-l-2 border-eve-orange bg-eve-orange/5 flex flex-col gap-0.5">
+              <div className="flex items-center gap-1.5 text-[10px] text-eve-orange font-mono uppercase tracking-wide">
+                <AlertTriangle size={9} className="shrink-0" />
+                Blueprint required
+              </div>
+              <div className="text-[9px] text-eve-muted leading-relaxed">
+                Obtain a BPC from your corp library, or purchase a BPO/BPC on the market or contracts.
+              </div>
+            </div>
+          )
+        )}
+        <div className="mt-0.5 space-y-px pl-2">
+          {step.inputs.map((inp, j) => (
+            <div key={j} className="flex items-center gap-1 text-[10px] text-eve-muted">
+              <span className="text-eve-dim">└</span>
+              <span>{inp.name} ×{inp.qty.toLocaleString()}</span>
+              {sourceTag(inp.source)}
+            </div>
+          ))}
+        </div>
+      </div>
+    )
+  }
+
   return (
     <motion.div
       initial={{ opacity: 0, scale: 0.95 }} animate={{ opacity: 1, scale: 1 }}
@@ -562,7 +1004,7 @@ function StepsPopout({
         </div>
         <div className="flex items-center gap-2 ml-2 shrink-0">
           {chainData && !chainLoading && (
-            <button onClick={exportCSV} className="text-eve-dim hover:text-eve-cyan transition-colors" title="Export to CSV">
+            <button onClick={exportXLSX} className="text-eve-dim hover:text-eve-cyan transition-colors" title="Export to Excel (.xlsx)">
               <Download size={11} />
             </button>
           )}
@@ -581,157 +1023,122 @@ function StepsPopout({
             <SectionHeader id="buy" icon={<ShoppingCart size={10} className="text-eve-muted" />} label="Procure (Raw Materials)" count={chainData.buyList.length} color="text-eve-muted" />
             {!collapsed['buy'] && (
               <div className="pt-1 space-y-px">
-                {chainData.buyList.map(item => (
-                  <div key={item.typeId} className="flex items-center justify-between gap-2 py-0.5 pl-4">
-                    <span className="text-eve-text truncate">{item.name}</span>
-                    <div className="flex items-center gap-2 shrink-0 font-mono text-[10px]">
-                      {item.have > 0 && <span className="text-eve-muted">have {item.have.toLocaleString()}</span>}
-                      {item.qty > item.have
-                        ? <span className="text-eve-orange">need {(item.qty - item.have).toLocaleString()}</span>
-                        : <span className="text-eve-green">✓ covered</span>}
+                {chainData.buyList.map(item => {
+                  const adj    = adjusted?.buyAdj.get(item.typeId)
+                  const have   = adj?.have   ?? item.have
+                  const adjQty = adj?.adjQty ?? Math.max(0, item.qty - item.have)
+                  const originalNeed = item.qty - item.have
+                  const saved  = originalNeed - adjQty
+                  return (
+                    <div key={item.typeId} className="flex items-center justify-between gap-2 py-0.5 pl-4">
+                      <span className="text-eve-text truncate">{item.name}</span>
+                      <div className="flex items-center gap-2 shrink-0 font-mono text-[10px]">
+                        {have > 0 && <span className="text-eve-muted">have {have.toLocaleString()}</span>}
+                        {saved > 0 && adjQty > 0 && (
+                          <span className="text-eve-dim" title={`${saved.toLocaleString()} saved from intermediates you already have`}>
+                            −{saved.toLocaleString()}
+                          </span>
+                        )}
+                        {adjQty > 0
+                          ? <span className="text-eve-orange">need {adjQty.toLocaleString()}</span>
+                          : <span className="text-eve-green">✓ covered</span>}
+                      </div>
                     </div>
-                  </div>
-                ))}
+                  )
+                })}
               </div>
             )}
           </div>
 
-          {/* ── Mfg intermediates (feed into reactions, e.g. fuel blocks) ── */}
+          {/* ── Mfg intermediates ─────────────────────────────────── */}
           {mfgIntermediates.length > 0 && (
             <div>
               <SectionHeader id="mfg-int" icon={<Wrench size={10} className="text-eve-cyan" />} label={`Mfg Intermediates  ·  ${mfgStructLabel}${system ? ' · ' + system : ''}`} count={mfgIntermediates.length} color="text-eve-cyan" />
               {!collapsed['mfg-int'] && (
                 <div className="pt-1 space-y-2">
-                  {mfgIntermediates.map((step, i) => (
-                    <div key={step.key} className="pl-4 border-l border-eve-cyan/20">
-                      <div className="flex items-baseline justify-between gap-2">
-                        <span className="text-eve-cyan font-mono">
-                          <span className="text-eve-dim text-[9px] mr-1">{i + 1}.</span>
-                          {step.name} <span className="text-eve-muted">×{step.qtyNeeded.toLocaleString()}</span>
-                        </span>
-                        <span className="text-eve-dim text-[9px] shrink-0">{step.runsNeeded}r · {formatTime(step.timePerRun * step.runsNeeded)}</span>
-                      </div>
-                      <div className="mt-0.5 space-y-px pl-2">
-                        {step.inputs.map((inp, j) => (
-                          <div key={j} className="flex items-center gap-1 text-[10px] text-eve-muted">
-                            <span className="text-eve-dim">└</span>
-                            <span>{inp.name} ×{inp.qty.toLocaleString()}</span>
-                            {sourceTag(inp.source)}
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  ))}
+                  {mfgIntermediates.map(step => <StepRow key={step.key} step={step} color="text-eve-cyan" borderColor="border-eve-cyan/20" />)}
                 </div>
               )}
             </div>
           )}
 
-          {/* ── Simple reactions (raw inputs only) ─────────────────── */}
+          {/* ── Simple reactions ───────────────────────────────────── */}
           {simpleReactions.length > 0 && (
             <div>
               <SectionHeader id="rx-simple" icon={<Zap size={10} className="text-eve-green" />} label={`Reactions  ·  ${rxStructLabel}${system ? ' · ' + system : ''}`} count={simpleReactions.length} color="text-eve-green" />
               {!collapsed['rx-simple'] && (
                 <div className="pt-1 space-y-2">
-                  {simpleReactions.map((step, i) => (
-                    <div key={step.key} className="pl-4 border-l border-eve-green/20">
-                      <div className="flex items-baseline justify-between gap-2">
-                        <span className="text-eve-green font-mono">
-                          <span className="text-eve-dim text-[9px] mr-1">{i + 1}.</span>
-                          {step.name} <span className="text-eve-muted">×{step.qtyNeeded.toLocaleString()}</span>
-                        </span>
-                        <span className="text-eve-dim text-[9px] shrink-0">{step.runsNeeded}r · {formatTime(step.timePerRun * step.runsNeeded)}</span>
-                      </div>
-                      <div className="mt-0.5 space-y-px pl-2">
-                        {step.inputs.map((inp, j) => (
-                          <div key={j} className="flex items-center gap-1 text-[10px] text-eve-muted">
-                            <span className="text-eve-dim">└</span>
-                            <span>{inp.name} ×{inp.qty.toLocaleString()}</span>
-                            {sourceTag(inp.source)}
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  ))}
+                  {simpleReactions.map(step => <StepRow key={step.key} step={step} color="text-eve-green" borderColor="border-eve-green/20" />)}
                 </div>
               )}
             </div>
           )}
 
-          {/* ── Advanced reactions (consume reaction outputs) ──────── */}
+          {/* ── Advanced reactions ─────────────────────────────────── */}
           {advReactions.length > 0 && (
             <div>
               <SectionHeader id="rx-adv" icon={<Zap size={10} className="text-purple-400" />} label={`Advanced Reactions  ·  ${rxStructLabel}${system ? ' · ' + system : ''}`} count={advReactions.length} color="text-purple-400" />
               {!collapsed['rx-adv'] && (
                 <div className="pt-1 space-y-2">
-                  {advReactions.map((step, i) => (
-                    <div key={step.key} className="pl-4 border-l border-purple-400/20">
-                      <div className="flex items-baseline justify-between gap-2">
-                        <span className="text-purple-400 font-mono">
-                          <span className="text-eve-dim text-[9px] mr-1">{i + 1}.</span>
-                          {step.name} <span className="text-eve-muted">×{step.qtyNeeded.toLocaleString()}</span>
-                        </span>
-                        <span className="text-eve-dim text-[9px] shrink-0">{step.runsNeeded}r · {formatTime(step.timePerRun * step.runsNeeded)}</span>
-                      </div>
-                      <div className="mt-0.5 space-y-px pl-2">
-                        {step.inputs.map((inp, j) => (
-                          <div key={j} className="flex items-center gap-1 text-[10px] text-eve-muted">
-                            <span className="text-eve-dim">└</span>
-                            <span>{inp.name} ×{inp.qty.toLocaleString()}</span>
-                            {sourceTag(inp.source)}
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  ))}
+                  {advReactions.map(step => <StepRow key={step.key} step={step} color="text-purple-400" borderColor="border-purple-400/20" />)}
                 </div>
               )}
             </div>
           )}
 
-          {/* ── Final manufacturing steps ──────────────────────────── */}
+          {/* ── Component manufacturing ────────────────────────────── */}
           {mfgFinal.length > 0 && (
             <div>
               <SectionHeader id="mfg" icon={<Wrench size={10} className="text-eve-cyan" />} label={`Manufacturing  ·  ${mfgStructLabel}${system ? ' · ' + system : ''}`} count={mfgFinal.length} color="text-eve-cyan" />
               {!collapsed['mfg'] && (
                 <div className="pt-1 space-y-2">
-                  {mfgFinal.map((step, i) => (
-                    <div key={step.key} className="pl-4 border-l border-eve-cyan/20">
-                      <div className="flex items-baseline justify-between gap-2">
-                        <span className="text-eve-cyan font-mono">
-                          <span className="text-eve-dim text-[9px] mr-1">{i + 1}.</span>
-                          {step.name} <span className="text-eve-muted">×{step.qtyNeeded.toLocaleString()}</span>
-                        </span>
-                        <span className="text-eve-dim text-[9px] shrink-0">{step.runsNeeded}r · {formatTime(step.timePerRun * step.runsNeeded)}</span>
-                      </div>
-                      <div className="mt-0.5 space-y-px pl-2">
-                        {step.inputs.map((inp, j) => (
-                          <div key={j} className="flex items-center gap-1 text-[10px] text-eve-muted">
-                            <span className="text-eve-dim">└</span>
-                            <span>{inp.name} ×{inp.qty.toLocaleString()}</span>
-                            {sourceTag(inp.source)}
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  ))}
+                  {mfgFinal.map(step => <StepRow key={step.key} step={step} color="text-eve-cyan" borderColor="border-eve-cyan/20" />)}
                 </div>
               )}
             </div>
           )}
 
-          {/* ── Final product ─────────────────────────────────────── */}
-          <div className="border border-eve-gold/30 bg-eve-gold/5 p-2">
-            <div className="flex items-center gap-2">
-              <Factory size={10} className="text-eve-gold shrink-0" />
-              <span className="text-eve-gold text-[10px] uppercase tracking-wider">Final Output</span>
+          {/* ── Final Assembly ─────────────────────────────────────── */}
+          {finalSteps && finalSteps.length > 0 && (
+            <div>
+              <SectionHeader id="final-asm" icon={<Factory size={10} className="text-eve-gold" />} label={`Final Assembly  ·  ${mfgStructLabel}${system ? ' · ' + system : ''}`} count={finalSteps.length} color="text-eve-gold" />
+              {!collapsed['final-asm'] && (
+                <div className="pt-1 space-y-2">
+                  {finalSteps.map((fs, i) => {
+                    const have       = fs.productTypeId != null ? (clientAssetMap?.get(fs.productTypeId) ?? 0) : 0
+                    const totalQty   = fs.runs * fs.qtyPerRun
+                    const adjRuns    = have >= totalQty ? 0 : Math.max(0, Math.ceil((totalQty - have) / Math.max(1, fs.qtyPerRun)))
+                    const allCovered = have >= totalQty
+                    return (
+                      <div key={i} className="pl-4 border-l border-eve-gold/30">
+                        <div className="flex items-baseline justify-between gap-2">
+                          <span className="text-eve-gold font-mono">
+                            {fs.name} <span className="text-eve-muted">×{totalQty.toLocaleString()}</span>
+                          </span>
+                          <div className="flex items-center gap-2 shrink-0">
+                            {have > 0 && (
+                              <span className={`text-[9px] font-mono ${allCovered ? 'text-eve-green' : 'text-eve-orange'}`}>
+                                {allCovered ? '✓ have' : `have ${have.toLocaleString()}`}
+                              </span>
+                            )}
+                            {allCovered
+                              ? <span className="text-[9px] text-eve-green">skip</span>
+                              : <span className="text-eve-dim text-[9px]">
+                                  {adjRuns}r{fs.timePerRun ? ` · ${formatTime(fs.timePerRun * adjRuns)}` : ''}
+                                </span>}
+                          </div>
+                        </div>
+                      </div>
+                    )
+                  })}
+                </div>
+              )}
             </div>
-            <div className="mt-1 text-eve-text font-mono">
-              {chainData.productName} <span className="text-eve-gold">×{chainData.productQty.toLocaleString()}</span>
-            </div>
-            <div className="text-[9px] text-eve-dim mt-0.5">
-              {steps.length} production job{steps.length !== 1 ? 's' : ''} · {chainData.buyList.filter(b => b.qty > b.have).length} materials to source
-            </div>
+          )}
+
+          {/* ── Summary footer ─────────────────────────────────────── */}
+          <div className="text-[9px] text-eve-dim border-t border-eve-border/30 pt-2">
+            {steps.length + (finalSteps?.length ?? 0)} production job{steps.length + (finalSteps?.length ?? 0) !== 1 ? 's' : ''} · {chainData.buyList.filter(b => b.qty > b.have).length} materials to source
           </div>
         </>)}
       </div>
@@ -1192,6 +1599,9 @@ function BlueprintCalculator({
     }
     return map
   }, [assets])
+
+  // Set of all typeIds in the character's assets — used to check blueprint ownership in StepsPopout
+  const ownedBpTypeIds = useMemo(() => new Set(assets.map(a => a.typeId)), [assets])
 
   // Enrich server materials with client-side quantities (client is always fresher than server cache)
   const enrichedMaterials = useMemo(() => {
@@ -2233,23 +2643,77 @@ function BlueprintCalculator({
       </AnimatePresence>
 
       {/* ── Steps Popout (portal-like fixed overlay) ─────────────── */}
-      <AnimatePresence>
-        {showStepsPopout && (activeBlueprint || fitPlanAllStepsActive.current) && (
-          <StepsPopout
-            blueprint={activeBlueprint ?? { typeId: 0, typeName: 'Full Fit Plan', me: 0, te: 0, runs: fitPlanItems.length }}
-            chainData={chainData}
-            chainLoading={chainLoading || allStepsLoading}
-            chainError={chainError}
-            mfgStructure={structure}
-            mfgRig={rig}
-            rxStructure={reactionStructure}
-            rxRig={reactionRig}
-            security={security}
-            system={system}
-            onClose={() => { setShowStepsPopout(false); fitPlanAllStepsActive.current = false }}
-          />
-        )}
-      </AnimatePresence>
+      {(() => {
+        // Compute export name based on context
+        let popoutExportName: string
+        if (fitPlanAllStepsActive.current) {
+          const names = fitPlanItems.filter(i => i.data).map(i => i.data!.productName)
+          const shown = names.slice(0, 2).join(' + ')
+          const extra = names.length > 2 ? ` + ${names.length - 2} more` : ''
+          popoutExportName = `${shown}${extra} — Fit Build`
+        } else if (fitPlanMode && activeBlueprint) {
+          const item = fitPlanItems.find(i => i.blueprint.typeId === activeBlueprint.typeId)
+          popoutExportName = (item?.data?.productName ?? activeBlueprint.typeName.replace(' Blueprint', '')) + ' — Fit'
+        } else {
+          popoutExportName = data?.productName ?? activeBlueprint?.typeName.replace(' Blueprint', '') ?? 'Build Chain'
+        }
+
+        // Compute finalSteps for the popout based on current mode
+        let popoutFinalSteps: FinalStep[] | undefined
+        if (fitPlanAllStepsActive.current) {
+          popoutFinalSteps = fitPlanItems
+            .filter(item => item.data)
+            .map(item => ({
+              name: item.data!.productName,
+              productTypeId: item.data!.productTypeId,
+              runs: item.blueprint.runs * fitPlanQty,
+              qtyPerRun: item.data!.productQty,
+              timePerRun: item.data!.adjustedTime,
+            }))
+        } else if (fitPlanMode && activeBlueprint) {
+          const item = fitPlanItems.find(i => i.blueprint.typeId === activeBlueprint.typeId)
+          if (item?.data) {
+            popoutFinalSteps = [{
+              name: item.data.productName,
+              productTypeId: item.data.productTypeId,
+              runs: item.blueprint.runs * fitPlanQty,
+              qtyPerRun: item.data.productQty,
+              timePerRun: item.data.adjustedTime,
+            }]
+          }
+        } else if (data) {
+          popoutFinalSteps = [{
+            name: data.productName,
+            productTypeId: data.productTypeId,
+            runs,
+            qtyPerRun: data.productQty,
+            timePerRun: data.adjustedTime,
+          }]
+        }
+        return (
+          <AnimatePresence>
+            {showStepsPopout && (activeBlueprint || fitPlanAllStepsActive.current) && (
+              <StepsPopout
+                blueprint={activeBlueprint ?? { typeId: 0, typeName: 'Full Fit Plan', me: 0, te: 0, runs: fitPlanItems.length }}
+                chainData={chainData}
+                chainLoading={chainLoading || allStepsLoading}
+                chainError={chainError}
+                mfgStructure={structure}
+                mfgRig={rig}
+                rxStructure={reactionStructure}
+                rxRig={reactionRig}
+                security={security}
+                system={system}
+                clientAssetMap={clientAssetMap}
+                ownedBpTypeIds={assets.length > 0 ? ownedBpTypeIds : undefined}
+                exportName={popoutExportName}
+                finalSteps={popoutFinalSteps}
+                onClose={() => { setShowStepsPopout(false); fitPlanAllStepsActive.current = false }}
+              />
+            )}
+          </AnimatePresence>
+        )
+      })()}
     </div>
   )
 }

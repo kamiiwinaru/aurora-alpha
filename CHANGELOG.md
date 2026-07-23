@@ -1,5 +1,24 @@
 # Changelog
 
+## [1.1.0] — 2026-07-22
+
+### Added
+- **Global PTT pass-through** — push-to-talk now uses `uiohook-napi` for system-wide key detection. Unlike `globalShortcut`, it observes the key without consuming it, so the keystroke still reaches whatever game or app has focus while Aurora listens in the background. Falls back to `globalShortcut` automatically if `uiohook` is unavailable.
+- **PTT key binding by physical key code** — PTT binding now uses `KeyboardEvent.code` (physical key position) instead of `.key` (character). This means keys like backtick work correctly without needing to hold Shift, and bindings are layout-independent.
+- **Janice sell analysis tab** — a second tab alongside the appraisal shows per-item sell recommendations: immediate sell vs. sell order net ISK, daily volume, estimated days-to-sell, liquidity rating (Fast/Moderate/Slow/Stale), and a recommended action per item. Configurable sales tax, broker fee, and minimum sell value filters. Sorting by any column.
+- **Janice multi-market selector** — market dropdown now covers all five major trade hubs: Jita, Amarr, Dodixie, Rens, and Hek. Market selection persists across appraisals.
+- **Industry chain inventory adjustment** — the production chain now accounts for items already in your inventory. Cascade propagation reduces downstream material demand when intermediates are partially or fully in stock. Individual steps can be overridden to force full production regardless of stock.
+- **Industry Excel export** — buy list and job steps can be exported to a formatted `.xlsx` file via ExcelJS.
+- **PVE mission loot/salvage/bounty** — mission detail cards in the PVE panel now show loot, salvage, faction tags, and bounty values from the mission database.
+- **Transcript noise filter** — a shared `isNoiseTranscript` utility strips hallucinated ASR tags (`[typing]`, `(laughs)`, etc.) and rejects filler-only transcripts before they are sent to Aurora. Applied to both the in-window PTT path and the global PTT path.
+- **`pttKeys` library** — centralised PTT key normalisation, code-to-label mapping, and modifier guard shared between `OptionsMenu`, `App.tsx`, and `electron/main.ts`.
+
+### Changed
+- PTT IPC channel renamed from `ptt:toggle` (single toggle event) to `ptt:state` (`'down'`/`'up'`), giving the renderer accurate hold-start and release events instead of synthesised toggle logic.
+- Global PTT while Aurora is unfocused now always routes to Aurora's chat regardless of active panel — the physical key passes through to the foreground app via uiohook, so the transcript only needs to go to Aurora.
+- Janice market selector changed from a text dropdown to a numeric hub ID — prevents mismatch between display label and API parameter.
+- PVE mission database expanded with additional loot/reward metadata.
+
 ## [1.0.9] — 2026-06-22
 
 ### Added

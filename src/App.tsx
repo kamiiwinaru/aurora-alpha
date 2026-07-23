@@ -37,6 +37,8 @@ import { useEve } from './hooks/useEve'
 import type { ActivePanel } from './types'
 import { storeTokens, isSpotifyConnected } from './lib/spotify/client'
 import { captureBaseline } from './lib/spotify/ducker'
+import { normalizeStoredPttKey, syncPttKeyToMain, PTT_CODE_DEFAULT } from './lib/pttKeys'
+import { isNoiseTranscript } from './lib/transcriptFilter'
 
 // Extend window type for Electron IPC
 declare global {
@@ -161,16 +163,20 @@ export default function App() {
 
   const intelSessionIdRef = useRef<string | null>(localStorage.getItem(INTEL_SESSION_KEY))
 
-  // ── Global PTT for non-COMMS panels ────────────────────────────────────
-  // ChatInput's voice hook is only mounted when activePanel === 'chat'.
-  // This handler covers all other panels — records, transcribes via Scribe,
-  // then fires sendInNewSession + VoiceBubble without switching panels.
+  // ── Global PTT ──────────────────────────────────────────────────────────
+  // Records + transcribes via Scribe, then types the result into whatever
+  // window has OS focus (see startGlobalPttRef below). Two ways in:
+  //  - `ptt:state` IPC from main.ts, only sent while Aurora is unfocused —
+  //    always handled here, regardless of active panel (see the listener below).
+  //  - in-window keydown/keyup, only live while Aurora IS focused and the
+  //    active panel isn't 'chat' (ChatInput/useVoiceInput owns the chat panel's
+  //    in-window key listener instead, and dictates into Aurora's own input).
   const activePanelRef = useRef(activePanel)
   useEffect(() => { activePanelRef.current = activePanel }, [activePanel])
 
   const globalPttRecorderRef = useRef<MediaRecorder | null>(null)
   const globalPttPhaseRef    = useRef<'off' | 'listening'>('off')
-  const globalPttKeyRef      = useRef(localStorage.getItem('aurora_ptt_key') ?? '`')
+  const globalPttKeyRef      = useRef(normalizeStoredPttKey(localStorage.getItem('aurora_ptt_key') ?? PTT_CODE_DEFAULT))
   const globalNoiseFloorRef  = useRef(Number(localStorage.getItem('aurora_noise_floor') ?? '12'))
 
   useEffect(() => {
@@ -223,7 +229,11 @@ export default function App() {
             })
             const data = await resp.json() as { text?: string }
             const transcript = (data.text ?? '').trim()
-            if (transcript.length >= 2 && /[a-zA-Z0-9]/.test(transcript)) {
+            if (!isNoiseTranscript(transcript)) {
+              // Global PTT always goes to Aurora's own chat — the physical key
+              // itself passes through to whatever app has focus (uiohook, when
+              // available; see electron/main.ts), so that app never needs the
+              // transcript, only Aurora does.
               chat.sendInNewSession(transcript)
               setShowVoiceBubble(true)
             }
@@ -250,14 +260,14 @@ export default function App() {
 
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
-      if (e.key !== globalPttKeyRef.current || e.repeat) return
+      if (e.code !== globalPttKeyRef.current || e.repeat) return
       if (activePanelRef.current === 'chat') return
       const tag = (document.activeElement as HTMLElement)?.tagName?.toLowerCase()
       if (tag === 'input' || tag === 'textarea') return
       startGlobalPttRef.current()
     }
     const onKeyUp = (e: KeyboardEvent) => {
-      if (e.key !== globalPttKeyRef.current) return
+      if (e.code !== globalPttKeyRef.current) return
       if (activePanelRef.current === 'chat') return
       stopGlobalPttRef.current()
     }
@@ -271,11 +281,16 @@ export default function App() {
 
   useEffect(() => {
     const api = (window as any).electronAPI
-    if (!api?.onPttToggle) return
-    const unsub = api.onPttToggle(() => {
-      if (activePanelRef.current === 'chat') return
-      if (globalPttPhaseRef.current === 'listening') stopGlobalPttRef.current()
-      else startGlobalPttRef.current()
+    if (!api?.onPttState) return
+    // `ptt:state` only ever arrives while Aurora is unfocused (main.ts only
+    // arms the global shortcut on blur), so it's handled here unconditionally
+    // regardless of which panel is active — routing by panel would let
+    // ChatInput's own listener catch it while on the chat panel and silently
+    // drop the transcript into Aurora's (invisible) chat box instead of
+    // typing into whatever window the user is actually looking at.
+    const unsub = api.onPttState((state: 'down' | 'up') => {
+      if (state === 'down') startGlobalPttRef.current()
+      else stopGlobalPttRef.current()
     })
     return unsub
   }, [])

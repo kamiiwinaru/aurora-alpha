@@ -1,6 +1,8 @@
 import { useState, useRef, useCallback, useEffect } from 'react'
 import { loadVoskModel, prewarmAudio, VoskSession, type VoskStatus } from '../lib/voskRecognizer'
 import { PTT_KEY_STORAGE, PTT_KEY_DEFAULT, NOISE_FLOOR_KEY, NOISE_FLOOR_DEFAULT } from '../components/OptionsMenu'
+import { normalizeStoredPttKey, syncPttKeyToMain } from '../lib/pttKeys'
+import { isNoiseTranscript } from '../lib/transcriptFilter'
 
 export type VoicePhase = 'off' | 'standby' | 'activated' | 'listening' | 'pending' | 'transcribing'
 
@@ -238,20 +240,6 @@ export function useVoiceInput({
     window.addEventListener('aurora_noise_floor_changed', onChanged)
     return () => window.removeEventListener('aurora_noise_floor_changed', onChanged)
   }, [])
-  // Noise-only transcript patterns — single filler words, punctuation, brackets
-  const NOISE_TRANSCRIPT_RE = /^[\s.,!?;:()\[\]{}"'`~@#$%^&*_+=|\\/<>-]+$/
-  const NOISE_WORDS = new Set(['um', 'uh', 'hmm', 'hm', 'ah', 'oh', 'er', 'mm'])
-
-  function isNoiseTranscript(text: string): boolean {
-    const t = text.trim()
-    if (!t || t.length < 2) return true
-    if (NOISE_TRANSCRIPT_RE.test(t)) return true
-    if (NOISE_WORDS.has(t.toLowerCase())) return true
-    // Must contain at least one letter or digit
-    if (!/[a-zA-Z0-9]/.test(t)) return true
-    return false
-  }
-
   // ── ElevenLabs Scribe push-to-talk ─────────────────────────────────────
   const startScribeRecording = useCallback(async () => {
     try {
@@ -320,7 +308,7 @@ export function useVoiceInput({
   }, [])
 
   // ── PTT keyboard shortcut — configurable hold-to-talk ──────────────────
-  const pttKeyRef = useRef(localStorage.getItem(PTT_KEY_STORAGE) ?? PTT_KEY_DEFAULT)
+  const pttKeyRef = useRef(normalizeStoredPttKey(localStorage.getItem(PTT_KEY_STORAGE) ?? PTT_KEY_DEFAULT))
 
   useEffect(() => {
     function onPttChanged(e: Event) {
@@ -332,13 +320,13 @@ export function useVoiceInput({
 
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
-      if (e.key !== pttKeyRef.current || e.repeat) return
+      if (e.code !== pttKeyRef.current || e.repeat) return
       const tag = (document.activeElement as HTMLElement)?.tagName?.toLowerCase()
       if (tag === 'input' || tag === 'textarea') return
       if (phaseRef.current === 'off') startScribeRecording()
     }
     const onKeyUp = (e: KeyboardEvent) => {
-      if (e.key !== pttKeyRef.current) return
+      if (e.code !== pttKeyRef.current) return
       if (phaseRef.current === 'listening') {
         if (mediaRecorderRef.current?.state === 'recording') {
           mediaRecorderRef.current.stop()
@@ -370,15 +358,17 @@ export function useVoiceInput({
     }
   }, [phase, stopScribeRecording, stopActive, clearSilenceTimer, startScribeRecording])
 
-  // ── Global PTT via Electron IPC (fires when Aurora window is not focused) ─
-  const toggleManualMicRef = useRef(toggleManualMic)
-  useEffect(() => { toggleManualMicRef.current = toggleManualMic }, [toggleManualMic])
+  // Note: the `ptt:state` IPC event (fired when Aurora is unfocused) is
+  // deliberately NOT handled here — it's owned exclusively by App.tsx's
+  // GlobalPTT handler, which dictates into whatever window has OS focus.
+  // This hook only owns the in-window (Aurora-focused) key listener above.
 
+  // Sync the persisted PTT key to the main process on startup — main.ts only
+  // learns about key changes via this IPC call, so without this it silently
+  // keeps its hardcoded default and the global (out-of-focus) shortcut never
+  // matches a custom key.
   useEffect(() => {
-    const api = (window as any).electronAPI
-    if (!api?.onPttToggle) return
-    const unsub = api.onPttToggle(() => toggleManualMicRef.current())
-    return unsub
+    syncPttKeyToMain(pttKeyRef.current)
   }, [])
 
   // Auto-listen removed — PTT is the input model; recording only on explicit trigger.

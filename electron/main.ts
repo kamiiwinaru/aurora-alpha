@@ -35,6 +35,61 @@ function log(msg: string) {
   } catch { /* ignore if userData not ready yet */ }
 }
 
+// ── Global PTT: low-level input hook ───────────────────────────────────────
+// uiohook-napi OBSERVES system-wide keyboard events without consuming them —
+// unlike Electron's globalShortcut (RegisterHotKey), which intercepts the key
+// for the whole OS, the real keystroke still reaches whatever app has focus
+// normally. Native module, loaded defensively: if it fails (e.g. blocked by
+// Smart App Control on a locked-down machine), main.ts falls back to
+// globalShortcut further down — the key gets consumed while PTT is armed in
+// that fallback, but the app still works.
+type UiohookModule = typeof import('uiohook-napi')
+let uiohookMod: UiohookModule | null = null
+try {
+  uiohookMod = require('uiohook-napi') as UiohookModule
+  uiohookMod.uIOhook.start()
+  log('ptt: uiohook-napi loaded — global PTT key will pass through to other apps normally')
+} catch (err) {
+  log(`ptt: uiohook-napi unavailable, falling back to globalShortcut (key consumed while PTT armed): ${err instanceof Error ? err.message : err}`)
+}
+
+// Maps our stored KeyboardEvent.code (e.g. "Backquote", "KeyA", "F5") to
+// uiohook's numeric keycode.
+const CODE_TO_UIOHOOK: Record<string, number> = (() => {
+  if (!uiohookMod) return {}
+  const K = uiohookMod.UiohookKey as unknown as Record<string, number>
+  const map: Record<string, number> = {
+    Backquote: K.Backquote, Minus: K.Minus, Equal: K.Equal,
+    BracketLeft: K.BracketLeft, BracketRight: K.BracketRight, Backslash: K.Backslash,
+    Semicolon: K.Semicolon, Quote: K.Quote, Comma: K.Comma, Period: K.Period, Slash: K.Slash,
+    Space: K.Space, Tab: K.Tab, Escape: K.Escape, Backspace: K.Backspace,
+    Delete: K.Delete, Insert: K.Insert, Home: K.Home, End: K.End,
+    PageUp: K.PageUp, PageDown: K.PageDown,
+    ArrowUp: K.ArrowUp, ArrowDown: K.ArrowDown, ArrowLeft: K.ArrowLeft, ArrowRight: K.ArrowRight,
+  }
+  for (let i = 0; i < 26; i++) { const l = String.fromCharCode(65 + i); map[`Key${l}`] = K[l] }
+  for (let i = 0; i <= 9; i++) map[`Digit${i}`] = K[String(i)]
+  for (let i = 1; i <= 24; i++) map[`F${i}`] = K[`F${i}`]
+  return map
+})()
+
+// Maps a KeyboardEvent.code to an Electron Accelerator token — only needed
+// for the globalShortcut fallback path.
+const CODE_TO_ACCELERATOR: Record<string, string> = (() => {
+  const map: Record<string, string> = {
+    Backquote: '`', Minus: '-', Equal: '=', BracketLeft: '[', BracketRight: ']',
+    Backslash: '\\', Semicolon: ';', Quote: "'", Comma: ',', Period: '.', Slash: '/',
+    Space: 'Space', Tab: 'Tab', Escape: 'Esc', Backspace: 'Backspace',
+    Delete: 'Delete', Insert: 'Insert', Home: 'Home', End: 'End',
+    PageUp: 'PageUp', PageDown: 'PageDown',
+    ArrowUp: 'Up', ArrowDown: 'Down', ArrowLeft: 'Left', ArrowRight: 'Right',
+  }
+  for (let i = 0; i < 26; i++) { const l = String.fromCharCode(65 + i); map[`Key${l}`] = l }
+  for (let i = 0; i <= 9; i++) map[`Digit${i}`] = String(i)
+  for (let i = 1; i <= 24; i++) map[`F${i}`] = `F${i}`
+  return map
+})()
+
 // In production, .env lives in userData so it survives updates and isn't in a read-only install dir
 const envPath = isDev
   ? join(__dirname, '../.env')
@@ -276,24 +331,91 @@ mainWindow.webContents.setWindowOpenHandler(({ url }) => {
     waitAndLoad()
   }
 
-  // Global PTT shortcut — only active when window is not focused to avoid double-fire
-  // with the in-window keydown handler. Key is configurable via ptt:setKey IPC.
-  let pttKey = '`'
-  const registerPtt = () => { try { globalShortcut.register(pttKey, () => mainWindow?.webContents.send('ptt:toggle')) } catch { /* invalid key */ } }
-  const unregisterPtt = () => { try { globalShortcut.unregister(pttKey) } catch { /* not registered */ } }
+  // Global PTT — reports key hold state to the renderer via ptt:state
+  // ('down'/'up') while Aurora is unfocused. Key is configurable via
+  // ptt:setKey IPC (sends the renderer's KeyboardEvent.code).
+  let pttCode = 'Backquote'
+  let pttHeld = false
 
-  mainWindow.on('blur',  registerPtt)
-  mainWindow.on('focus', unregisterPtt)
+  if (uiohookMod) {
+    // Primary path: uiohook fires real keydown/keyup, so no debounce/guess-work
+    // is needed — 'down' on first press, 'up' on the actual release. It never
+    // consumes the key, so it naturally passes through to whatever app has
+    // focus; we just gate on mainWindow.isFocused() so we don't double-fire
+    // against the in-window listener when Aurora itself is focused.
+    uiohookMod.uIOhook.on('keydown', (e) => {
+      if (mainWindow?.isFocused()) return
+      if (CODE_TO_UIOHOOK[pttCode] !== e.keycode) return
+      if (pttHeld) return
+      pttHeld = true
+      log('ptt: [uiohook] key-down')
+      mainWindow?.webContents.send('ptt:state', 'down')
+    })
+    uiohookMod.uIOhook.on('keyup', (e) => {
+      if (CODE_TO_UIOHOOK[pttCode] !== e.keycode) return
+      if (!pttHeld) return
+      pttHeld = false
+      log('ptt: [uiohook] key-up')
+      mainWindow?.webContents.send('ptt:state', 'up')
+    })
+  }
 
-  ipcMain.handle('ptt:setKey', (_e, newKey: string) => {
+  // Fallback path (uiohook unavailable): globalShortcut has no real keyup, so
+  // bucket its repeat-fire stream into synthetic down/up like before. The key
+  // gets consumed while armed — no pass-through — but PTT still works.
+  const PTT_HOLD_GAP_MS = 350
+  let pttReleaseTimer: ReturnType<typeof setTimeout> | null = null
+  const registerPtt = () => {
+    if (uiohookMod) return
+    const accel = CODE_TO_ACCELERATOR[pttCode]
+    if (!accel) { log(`ptt: registerPtt — no accelerator mapping for code "${pttCode}"`); return }
+    try {
+      const ok = globalShortcut.register(accel, () => {
+        log(`ptt: [fallback] global accelerator "${accel}" fired`)
+        if (!pttHeld) {
+          pttHeld = true
+          log('ptt: [fallback] key-down (start of hold)')
+          mainWindow?.webContents.send('ptt:state', 'down')
+        }
+        if (pttReleaseTimer) clearTimeout(pttReleaseTimer)
+        pttReleaseTimer = setTimeout(() => {
+          pttHeld = false
+          pttReleaseTimer = null
+          log('ptt: [fallback] key-up (no repeat within hold-gap timeout)')
+          mainWindow?.webContents.send('ptt:state', 'up')
+        }, PTT_HOLD_GAP_MS)
+      })
+      log(`ptt: [fallback] registerPtt("${accel}") -> ${ok ? 'ok' : 'FAILED (accelerator already taken)'}`)
+    } catch (err) {
+      log(`ptt: [fallback] registerPtt("${accel}") threw: ${err instanceof Error ? err.message : err}`)
+    }
+  }
+  const unregisterPtt = () => {
+    if (uiohookMod) return
+    if (pttReleaseTimer) { clearTimeout(pttReleaseTimer); pttReleaseTimer = null }
+    if (pttHeld) {
+      log('ptt: [fallback] key-up (window refocused mid-hold)')
+      mainWindow?.webContents.send('ptt:state', 'up')
+    }
+    pttHeld = false
+    const accel = CODE_TO_ACCELERATOR[pttCode]
+    if (accel) { try { globalShortcut.unregister(accel) } catch { /* not registered */ } }
+  }
+
+  mainWindow.on('blur',  () => { log('ptt: window blurred');  registerPtt() })
+  mainWindow.on('focus', () => { log('ptt: window focused'); unregisterPtt() })
+
+  ipcMain.handle('ptt:setKey', (_e, newCode: string) => {
+    log(`ptt: ptt:setKey received — "${pttCode}" -> "${newCode}"`)
     const wasBlurred = !mainWindow?.isFocused()
     if (wasBlurred) unregisterPtt()
-    pttKey = newKey
+    pttCode = newCode
     if (wasBlurred) registerPtt()
   })
 
   mainWindow.on('closed', () => {
     globalShortcut.unregisterAll()
+    uiohookMod?.uIOhook.stop()
     mainWindow = null
   })
 }

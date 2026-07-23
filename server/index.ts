@@ -871,11 +871,13 @@ let _mapLyPerUnit = 0
 interface MissionNPC { group: string; class: string; count: number; name: string; trigger: string | null; web: boolean; point: boolean; ewar: string | null; notes: string | null }
 interface MissionPocket { name: string; description: string; npcs: MissionNPC[] }
 interface MissionExtra { type: string; note: string }
+interface MissionLoot { bounty: string | null; loot: string | null; salvage: string | null; tags: string | null; items: string[] }
 interface MissionEntry {
   id: string; name: string; wikiTitle: string; level: number | null; type: string | null
   objective: string | null; factions: string[]; standingLoss: string | null
   damageDeal: string | null; damageResist: string | null; shipSuggestion: string[]
   extras: MissionExtra[]; briefing: string | null; pockets: MissionPocket[]; blitz: string | null
+  loot: MissionLoot | null
 }
 
 let _missions: MissionEntry[] = []
@@ -1897,6 +1899,7 @@ async function executeMarketTool(name: string, input: Record<string, unknown>, c
           extras: m.extras,
           objective: m.objective,
           blitz: m.blitz,
+          loot: m.loot || undefined,
           pockets: m.pockets.map(p => ({
             name: p.name,
             description: p.description,
@@ -3590,7 +3593,7 @@ app.post('/api/eve/token', async (req, res) => {
 
 // ── Janice appraisal proxy ────────────────────────────────────────────────
 app.post('/api/janice', async (req, res) => {
-  const { items, market = 'Jita' } = req.body as { items: string; market?: string }
+  const { items, market = 2 } = req.body as { items: string; market?: number }
   if (!items?.trim()) return res.status(400).json({ error: 'items required' })
 
   const apiKey = process.env.JANICE_API_KEY
@@ -3600,7 +3603,7 @@ app.post('/api/janice', async (req, res) => {
   }
 
   try {
-    const url = `https://janice.e-351.com/api/rest/v2/appraisal?designation=appraisal&pricing=split&pricingVariant=immediate&marketName=${encodeURIComponent(market)}&raw=1`
+    const url = `https://janice.e-351.com/api/rest/v2/appraisal?designation=appraisal&pricing=split&pricingVariant=immediate&market=${market}&raw=1`
     const response = await fetch(url, {
       method: 'POST',
       headers: {
@@ -3635,6 +3638,10 @@ app.post('/api/janice', async (req, res) => {
             sell: { min: ep.sellPrice ?? 0 },
             split: { price: ep.splitPrice ?? 0 },
           },
+          sellOrderCount: (item.sellOrderCount as number) ?? 0,
+          sellVolume: (item.sellVolume as number) ?? 0,
+          buyOrderCount: (item.buyOrderCount as number) ?? 0,
+          buyVolume: (item.buyVolume as number) ?? 0,
         }
       })
       data.totalVolume = (data.items as Array<{ volume?: number }>).reduce((s, it) => s + (it.volume ?? 0), 0)
@@ -3736,6 +3743,30 @@ app.get('/api/market/history', async (req, res) => {
   } catch {
     res.status(200).json([])
   }
+})
+
+// ── Market history batch ───────────────────────────────────────────────────
+app.get('/api/market/history/batch', async (req, res) => {
+  const raw = String(req.query.typeIds ?? '')
+  const market = String(req.query.market ?? 'Jita')
+  const regionId = REGION_IDS[market] ?? REGION_IDS.Jita
+  const typeIds = raw.split(',').map(Number).filter(Boolean)
+  if (!typeIds.length) return res.status(400).json({ error: 'typeIds required' })
+
+  const results: Record<number, number> = {} // typeId → avg30DayVolume
+  await Promise.all(typeIds.map(async (typeId) => {
+    try {
+      const url = `https://esi.evetech.net/latest/markets/${regionId}/history/?datasource=tranquility&type_id=${typeId}`
+      const r = await fetch(url, { headers: { Accept: 'application/json' } })
+      if (!r.ok) { results[typeId] = 0; return }
+      const history: Array<{ volume: number }> = await r.json()
+      const last30 = history.slice(-30)
+      results[typeId] = last30.length ? last30.reduce((s, d) => s + d.volume, 0) / last30.length : 0
+    } catch {
+      results[typeId] = 0
+    }
+  }))
+  res.json(results)
 })
 
 // ── EVE universe name→ID resolution proxy ─────────────────────────────────

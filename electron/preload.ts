@@ -34,13 +34,14 @@ contextBridge.exposeInMainWorld('electronAPI', {
   launchApp: () => ipcRenderer.send('app:launch'),
   captureScreenshot: () => ipcRenderer.invoke('window:captureScreenshot'),
   readLog: () => ipcRenderer.invoke('window:readLog'),
-  // PTT global shortcut — returns unsubscribe fn
-  onPttToggle: (cb: () => void) => {
-    const listener = () => cb()
-    ipcRenderer.on('ptt:toggle', listener)
-    return () => ipcRenderer.removeListener('ptt:toggle', listener)
+  // PTT global key — 'down' once at the start of a hold, 'up' once released.
+  // Returns an unsubscribe fn.
+  onPttState: (cb: (state: 'down' | 'up') => void) => {
+    const listener = (_e: unknown, state: 'down' | 'up') => cb(state)
+    ipcRenderer.on('ptt:state', listener)
+    return () => ipcRenderer.removeListener('ptt:state', listener)
   },
-  setPttKey: (key: string) => ipcRenderer.invoke('ptt:setKey', key),
+  setPttKey: (code: string) => ipcRenderer.invoke('ptt:setKey', code),
   isNoAIMode: () => ipcRenderer.invoke('config:noAIMode') as Promise<boolean>,
   clearKeys: (keys: string[], setNoAI?: boolean) => ipcRenderer.invoke('setup:clearKeys', keys, setNoAI),
 })
